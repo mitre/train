@@ -5,29 +5,31 @@ require "azure_graph_rbac"
 # Wrapper class for ::Azure::GraphRbac::Profiles::Latest::Client allowing custom configuration,
 # for example, defining additional settings for the ::MsRestAzure::ApplicationTokenProvider.
 class GraphRbac
-  AUTH_ENDPOINT = MsRestAzure::AzureEnvironments::AzureCloud.active_directory_endpoint_url
-  API_ENDPOINT = MsRestAzure::AzureEnvironments::AzureCloud.active_directory_graph_resource_id
+  def self.client(credentials, active_cloud, active_profile)
+    credentials = credentials.clone
+    credentials[:credentials] = ::MsRest::TokenCredentials.new(provider(credentials, active_cloud))
+    credentials[:base_url] = api_endpoint(active_cloud)
+    credentials[:active_directory_settings] = settings(credentials, active_cloud)
 
-  def self.client(credentials)
-    credentials[:credentials] = ::MsRest::TokenCredentials.new(provider(credentials))
-    credentials[:base_url] = API_ENDPOINT
-
-    ::Azure::GraphRbac::Profiles::Latest::Client.new(credentials)
+    active_profile::Client.new(credentials)
   end
 
-  def self.provider(credentials)
+  def self.provider(credentials, active_cloud)
     ::MsRestAzure::ApplicationTokenProvider.new(
       credentials[:tenant_id],
       credentials[:client_id],
       credentials[:client_secret],
-      settings
+      settings(active_cloud)
     )
   end
 
-  def self.settings
-    client_settings = MsRestAzure::ActiveDirectoryServiceSettings.get_azure_settings
-    client_settings.authentication_endpoint = AUTH_ENDPOINT
-    client_settings.token_audience = API_ENDPOINT
+  def self.api_endpoint(active_cloud)
+    active_cloud.active_directory_graph_resource_id
+  end
+
+  def self.settings(active_cloud)
+    client_settings = MsRestAzure::ActiveDirectoryServiceSettings.get_settings(active_cloud)
+    client_settings.token_audience = api_endpoint(active_cloud)
     client_settings
   end
 
