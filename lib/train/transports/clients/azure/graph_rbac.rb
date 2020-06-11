@@ -19,7 +19,7 @@ class GraphRbac
       credentials[:tenant_id],
       credentials[:client_id],
       credentials[:client_secret],
-      settings(active_cloud)
+      settings(credentials, active_cloud)
     )
   end
 
@@ -27,7 +27,7 @@ class GraphRbac
     active_cloud.active_directory_graph_resource_id
   end
 
-  def self.settings(active_cloud)
+  def self.settings(credentials, active_cloud)
     client_settings = MsRestAzure::ActiveDirectoryServiceSettings.get_settings(active_cloud)
     client_settings.token_audience = api_endpoint(active_cloud)
     client_settings

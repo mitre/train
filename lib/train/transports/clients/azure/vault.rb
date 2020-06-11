@@ -15,7 +15,6 @@ class Vault
     credentials[:base_url] = api_endpoint(vault_name, active_cloud)
     credentials[:active_directory_settings] = settings(credentials, active_cloud)
 
-    Inspec::Log.debug "Creating vault client for profile #{active_profile} with base url #{credentials[:base_url]} and active directory settings #{credentials[:active_directory_settings]}"
     active_profile::Mgmt::Client.new(credentials)
   end
 

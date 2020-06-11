@@ -14,9 +14,6 @@ require "train/transports/clients/azure/management"
 
 module Train::Transports
 
-  class AzureApiProfileError < Train::TransportError; end
-  class AzureApiNameSpaceError < Train::TransportError; end
-
   class Azure < Train.plugin(1)
     name "azure"
     option :tenant_id, default: ENV["AZURE_TENANT_ID"]
@@ -54,6 +51,10 @@ module Train::Transports
     end
 
     class Connection < BaseConnection
+
+      class ApiProfileError < Train::TransportError; end
+      class ApiNameSpaceError < Train::TransportError; end
+    
       attr_reader :options, :logger
 
       DEFAULT_FILE = ::File.join(Dir.home, ".azure", "credentials")
@@ -87,7 +88,7 @@ module Train::Transports
 
 
       def active_cloud
-        @active_cloud_config ||= {
+        @active_cloud_config = {
           :name => @options[:cloud_name],
           :portal_url => @options[:cloud_portal_url],
           :publishing_profile_url => @options[:cloud_publishing_profile_url],
@@ -105,7 +106,7 @@ module Train::Transports
           :datalake_store_filesystem_endpoint_suffix => @options[:cloud_datalake_store_fs_endpoint_suffix],
           :datalake_analytics_catalog_and_job_endpoint_suffix => @options[:cloud_datalake_analytics_catalog_and_job_endpoint_suffix]
         }
-        @active_cloud ||= ::MsRestAzure::AzureEnvironments::AzureEnvironment.new(@active_cloud_config)
+        @active_cloud = ::MsRestAzure::AzureEnvironments::AzureEnvironment.new(@active_cloud_config)
 
         logger.debug "Using custom azure cloud configuration.\n#{@active_cloud_config}"
 
@@ -119,12 +120,8 @@ module Train::Transports
       end
 
       def fetch_profile(azure_module = ::Azure::Resources)
-        begin
-          logger.debug "Fetching profile #{options[:api_profile]} for azure module #{azure_module}"
-          return azure_module::Profiles.const_get(@options[:api_profile]) if azure_module::Profiles.const_defined? @options[:api_profile]
-        rescue ::NameError
-          nil
-        end
+        logger.debug "Fetching profile #{options[:api_profile]} for azure module #{azure_module}"
+        return azure_module::Profiles.const_get(@options[:api_profile]) if azure_module::Profiles.const_defined? @options[:api_profile]
         
         raise ApiProfileError.new("Error fetching api profile #{@options[:api_profile]}. Profile does not exist. Available profiles #{azure_module::Profiles.constants}")
       end
@@ -146,6 +143,8 @@ module Train::Transports
         elsif azure_module == ::Azure::KeyVault
           @credentials[:token_audience] = @options[:cloud_ad_vault_resource_id]
           client = Vault.client(opts[:vault_name], @credentials, active_cloud, fetch_profile(azure_module))
+        else
+          raise ::Train::UserError, "Cannot create client for unknown Azure Resource '#{azure_module}'"
         end
 
         # Cache if enabled
