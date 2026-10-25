@@ -86,10 +86,12 @@ module Train::Platforms::Detect::Helpers
     # The IOS line of `show version`: "Cisco IOS Software, ...", with a release tag on IOS XE
     # 16 and later ("Cisco IOS Software [Everest], ...", "[IOSXE]", even "[]"), or the 12.x
     # form "IOS (tm) ...". It names the image in parentheses and then the version.
-    # Neither pattern is anchored to the start of a line: the first command of a session can
-    # carry a MOTD or exec banner that ends without a newline, glued to the line. The version
-    # stops at a space, comma or line end (CRLF over SSH).
-    CISCO_IOS_LINE = /(?:Cisco IOS Software(?: \[(?<tag>[^\]]*)\])?,|IOS \(tm\)) (?<description>.*?) ?\((?<image>[^)]+)\),? +(?:Experimental )?Version (?<version>[^\s,]+)/.freeze
+    # "Cisco IOS Software" is not anchored to the start of a line: the first command of a
+    # session can carry a MOTD or exec banner that ends without a newline, glued to the line.
+    # "IOS (tm)" alone is too common a phrase to match mid-line; 12.x prints it at the start
+    # of a line, after "Cisco Internetwork Operating System Software". The version stops at a
+    # space, comma or line end (CRLF over SSH).
+    CISCO_IOS_LINE = /(?:Cisco IOS Software(?: \[(?<tag>[^\]]*)\])?,|^IOS \(tm\)) (?<description>.*?) ?\((?<image>[^)]+)\),? +(?:Experimental )?Version (?<version>[^\s,]+)/.freeze
     CISCO_IOS_XE_LINE = /Cisco IOS XE Software, Version (?<version>[^\s,]+)/.freeze
     CISCO_IOS_XE_NOTICE = /Cisco IOS-XE software, Copyright/.freeze
 
