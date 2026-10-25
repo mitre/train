@@ -5,14 +5,21 @@ require "train/transports/ssh"
 # every carriage return or line feed is an Enter, each Enter's reply arrives as its own
 # chunk, and the connection only sees a chunk when it processes the channel. A secret of
 # nil is a router with no enable secret (a vty refuses enable); :none is an enable that
-# asks for no password.
+# asks for no password. split: sends each reply's last line end and prompt as separate
+# chunks, as a device may packetize them; password_prompt: is the text enable asks with
+# (`aaa authentication password-prompt` changes it); stall_on: is a line the device never
+# answers, so processing the channel then returns nothing.
 class FakeIOSShell
   attr_reader :lines
 
-  def initialize(connection, privilege:, secret:)
+  def initialize(connection, privilege:, secret:, split: false, password_prompt: "Password: ", stall_on: nil)
     @connection = connection
     @privilege = privilege
     @secret = secret
+    @split = split
+    @password_prompt = password_prompt
+    @stall_on = stall_on
+    @stalled = false
     @password_attempts = nil
     @line = +""
     @lines = []
@@ -42,6 +49,7 @@ class FakeIOSShell
   end
 
   def process(_timeout)
+    return if @chunks.empty? && @stalled
     raise "the device has nothing more to send" if @chunks.empty?
 
     @connection.instance_variable_set(:@buf, @connection.instance_variable_get(:@buf) + @chunks.shift)
@@ -57,7 +65,15 @@ class FakeIOSShell
     line = @line
     @line = +""
     @lines << line
-    @chunks << (@password_attempts ? password(line) : command(line))
+    return @stalled = true if line == @stall_on
+
+    reply = @password_attempts ? password(line) : command(line)
+    cut = reply.rindex("\r\n")
+    if @split && cut
+      @chunks << reply[0, cut + 2] << reply[(cut + 2)..-1]
+    else
+      @chunks << reply
+    end
   end
 
   # Passwords are not echoed. Three wrong tries return to user EXEC.
@@ -69,7 +85,7 @@ class FakeIOSShell
     end
 
     @password_attempts += 1
-    return "\r\nPassword: " if @password_attempts < 3
+    return "\r\n#{@password_prompt}" if @password_attempts < 3
 
     @password_attempts = nil
     "\r\n% Bad secrets\r\n\r\n#{prompt}"
@@ -84,7 +100,7 @@ class FakeIOSShell
       return "enable\r\n#{prompt}" if @privilege == 15
 
       @password_attempts = 0
-      "enable\r\nPassword: "
+      "enable\r\n#{@password_prompt}"
     when "show privilege"
       "#{line}\r\nCurrent privilege level is #{@privilege}\r\n#{prompt}"
     when "show clock"
@@ -131,9 +147,9 @@ describe "CiscoIOSConnection" do
   end
 
   describe "enable mode" do
-    def connect(privilege:, enable_password: "s3cret", secret: "s3cret")
-      conn = cls.new(opts.merge(enable_password: enable_password)).connection
-      shell = FakeIOSShell.new(conn, privilege: privilege, secret: secret)
+    def connect(privilege:, enable_password: "s3cret", secret: "s3cret", timeout: 15, **shell_options)
+      conn = cls.new(opts.merge(enable_password: enable_password, connection_timeout: timeout)).connection
+      shell = FakeIOSShell.new(conn, privilege: privilege, secret: secret, **shell_options)
       conn.stubs(:establish_connection)
       conn.stubs(:open_channel).returns(shell)
       [conn, shell]
@@ -145,6 +161,28 @@ describe "CiscoIOSConnection" do
       _(conn.run_command("show privilege").stdout).must_equal "Current privilege level is 15"
       _(conn.run_command("show clock").stdout).must_equal "16:26:00.000 UTC Sun Oct 25 2026"
       _(conn.run_command("show privilege").stdout).must_equal "Current privilege level is 15"
+    end
+
+    it "enters enable mode when the device sends a line end and the prompt apart" do
+      conn, = connect(privilege: 1, split: true)
+
+      _(conn.run_command("show privilege").stdout).must_equal "Current privilege level is 15"
+      _(conn.run_command("show clock").stdout).must_equal "16:26:00.000 UTC Sun Oct 25 2026"
+    end
+
+    it "answers an enable password prompt set by AAA" do
+      conn, = connect(privilege: 1, password_prompt: "Enter enable secret: ")
+
+      _(conn.run_command("show privilege").stdout).must_equal "Current privilege level is 15"
+    end
+
+    it "gives up after the connection timeout when the device does not answer enable" do
+      conn, = connect(privilege: 1, stall_on: "enable", timeout: 0.2)
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+
+      error = _ { conn.run_command("show privilege") }.must_raise Train::Transports::SSHFailed
+      _(error.message).must_include "enable"
+      _(Process.clock_gettime(Process::CLOCK_MONOTONIC) - started).must_be :<, 5
     end
 
     it "does not type enable when the session is already privileged" do

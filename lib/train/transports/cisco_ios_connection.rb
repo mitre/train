@@ -67,18 +67,22 @@ class Train::Transports::SSH
       @session
     end
 
-    PASSWORD_PROMPT = /Password: ?\z/.freeze
+    # IOS ends the enable password prompt with a colon, whether its own "Password: " or one
+    # set with `aaa authentication password-prompt`.
+    PASSWORD_PROMPT = /:\s?\z/.freeze
     PRIVILEGED_PROMPT = /\S+#\z/.freeze
     USER_EXEC_PROMPT = /\S+>\z/.freeze
-    # IOS asks for the enable password three times before it gives up.
+    # IOS asks for the enable password three times before it gives up; this many empty
+    # answers return to user EXEC after a wrong one.
     ENABLE_ATTEMPTS = 3
 
     # Types `enable` and the password one line at a time, reading each reply before sending
-    # the next line, so no reply is left on the channel for the next command. A wrong
-    # password is asked for again; empty answers use up the remaining tries and return the
-    # session to user EXEC.
+    # the next line, so no reply is left on the channel for the next command. Only what
+    # follows the echo of `enable` counts as its reply: a prompt still in flight from the
+    # previous command can arrive first. A wrong password is asked for again; empty answers
+    # use up the remaining tries and return the session to user EXEC.
     def enable_privileged_exec
-      reply = exchange("enable\n", PRIVILEGED_PROMPT, PASSWORD_PROMPT, USER_EXEC_PROMPT)
+      reply = exchange("enable\n", PRIVILEGED_PROMPT, PASSWORD_PROMPT, USER_EXEC_PROMPT, echo: "enable")
       return if reply.match?(PRIVILEGED_PROMPT)
       raise BadEnablePassword, "enable refused: #{reply.strip}" if reply.match?(USER_EXEC_PROMPT)
 
@@ -93,12 +97,22 @@ class Train::Transports::SSH
       raise BadEnablePassword, "enable password rejected"
     end
 
-    # Sends one line and reads the channel until the reply ends with one of the patterns.
-    def exchange(line, *patterns)
+    # Sends one line and reads the channel until the reply (what follows the echo, when one
+    # is given) ends with one of the patterns, for at most the connection timeout.
+    def exchange(line, *patterns, echo: nil)
       @buf = ""
       session.send_data(line)
-      session.connection.process(0) until patterns.any? { |pattern| @buf.match?(pattern) }
-      @buf
+      seconds = @ssh_options.fetch(:timeout, 15)
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + seconds
+      loop do
+        reply = echo ? @buf[/#{Regexp.quote(echo)}\r?\n(.*)\z/m, 1] : @buf
+        return reply if reply && patterns.any? { |pattern| reply.match?(pattern) }
+        if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+          raise Train::Transports::SSHFailed, "no answer to enable within #{seconds} seconds"
+        end
+
+        session.connection.process(0.1)
+      end
     end
 
     def run_command_via_connection(cmd, &_data_handler)
