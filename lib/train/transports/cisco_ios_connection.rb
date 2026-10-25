@@ -8,8 +8,10 @@ class Train::Transports::SSH
       # Extract options to avoid passing them in to `Net::SSH.start` later
       @host = options.delete(:host)
       @user = options.delete(:user)
-      @port = options.delete(:port)
+      @port = options[:port] # kept for `Net::SSH.start`
       @enable_password = options.delete(:enable_password)
+      @platform = options.delete(:platform)
+      @platform.backend = self if @platform
 
       # Use all options left that are not `nil` for `Net::SSH.start` later
       @ssh_options = options.reject { |_key, value| value.nil? }
@@ -55,8 +57,7 @@ class Train::Transports::SSH
         # This verifies we are not in privileged exec mode before running the
         # enable command. Otherwise, the password will be in history.
         if run_command_via_connection("show privilege").stdout.split[-1] != "15"
-          # Extra newlines to get back to prompt if incorrect password is used
-          run_command_via_connection("enable\n#{@enable_password}\n\n\n")
+          enable_privileged_exec
         end
       end
 
@@ -64,6 +65,40 @@ class Train::Transports::SSH
       run_command_via_connection("terminal length 0")
 
       @session
+    end
+
+    PASSWORD_PROMPT = /Password: ?\z/.freeze
+    PRIVILEGED_PROMPT = /\S+#\z/.freeze
+    USER_EXEC_PROMPT = /\S+>\z/.freeze
+    # IOS asks for the enable password three times before it gives up.
+    ENABLE_ATTEMPTS = 3
+
+    # Types `enable` and the password one line at a time, reading each reply before sending
+    # the next line, so no reply is left on the channel for the next command. A wrong
+    # password is asked for again; empty answers use up the remaining tries and return the
+    # session to user EXEC.
+    def enable_privileged_exec
+      reply = exchange("enable\n", PRIVILEGED_PROMPT, PASSWORD_PROMPT, USER_EXEC_PROMPT)
+      return if reply.match?(PRIVILEGED_PROMPT)
+      raise BadEnablePassword, "enable refused: #{reply.strip}" if reply.match?(USER_EXEC_PROMPT)
+
+      reply = exchange("#{@enable_password}\n", PRIVILEGED_PROMPT, PASSWORD_PROMPT, USER_EXEC_PROMPT)
+      return if reply.match?(PRIVILEGED_PROMPT)
+
+      ENABLE_ATTEMPTS.times do
+        break unless reply.match?(PASSWORD_PROMPT)
+
+        reply = exchange("\n", PASSWORD_PROMPT, USER_EXEC_PROMPT)
+      end
+      raise BadEnablePassword, "enable password rejected"
+    end
+
+    # Sends one line and reads the channel until the reply ends with one of the patterns.
+    def exchange(line, *patterns)
+      @buf = ""
+      session.send_data(line)
+      session.connection.process(0) until patterns.any? { |pattern| @buf.match?(pattern) }
+      @buf
     end
 
     def run_command_via_connection(cmd, &_data_handler)

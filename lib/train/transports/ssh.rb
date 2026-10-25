@@ -38,6 +38,10 @@ module Train::Transports
     require_relative "ssh_connection"
     require_relative "cisco_ios_connection"
 
+    # Platform predicates that get the CiscoIOSConnection (enable, terminal length 0, IOS
+    # errors): a platform named, or in a family named, cisco_ios or cisco_ios_xe.
+    CISCO_IOS_PREDICATES = %i{cisco_ios? cisco_ios_xe?}.freeze
+
     # add options for submodules
     include_options Train::Extras::CommandWrapper
 
@@ -290,10 +294,12 @@ module Train::Transports
       @connection_options = options
       conn = Connection.new(options, &block)
 
-      # Cisco IOS requires a special implementation of `Net:SSH`. This uses the
-      # SSH transport to identify the platform, but then replaces SSHConnection
-      # with a CiscoIOSConnection in order to behave as expected for the user.
-      if defined?(conn.platform.cisco_ios?) && conn.platform.cisco_ios?
+      # Cisco IOS and IOS XE require a special implementation of `Net:SSH`. This
+      # uses the SSH transport to identify the platform, but then replaces
+      # SSHConnection with a CiscoIOSConnection in order to behave as expected for
+      # the user. NX-OS (also in the cisco family) keeps the plain SSH connection.
+      platform = conn.platform
+      if CISCO_IOS_PREDICATES.any? { |predicate| platform.respond_to?(predicate) && platform.public_send(predicate) }
         ios_options = {}
         ios_options[:host] = @options[:host]
         ios_options[:user] = @options[:user]
@@ -303,6 +309,14 @@ module Train::Transports
         ios_options[:enable_password] = @options[:enable_password] || @options[:sudo_password]
         ios_options[:logger] = @options[:logger]
         ios_options.merge!(@connection_options)
+        # The same route to the device as the connection that detected it.
+        if conn.check_proxy
+          require "net/ssh/proxy/command"
+          ios_options[:proxy] = Net::SSH::Proxy::Command.new(conn.generate_proxy_command)
+        end
+        # Detecting again would send the Unix and Windows probes to the IOS shell.
+        ios_options[:platform] = platform
+        conn.close
         conn = CiscoIOSConnection.new(ios_options)
       end
 

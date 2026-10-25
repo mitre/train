@@ -146,6 +146,89 @@ describe "ssh transport" do
     end
   end
 
+  describe "connection for Cisco devices" do
+    # The platform as detection gives it, with its family hierarchy, so family predicates
+    # such as cisco? answer as they do on a real device.
+    def detected(platform_name)
+      plat = Train::Platforms.name(platform_name)
+      plat.find_family_hierarchy
+      plat.add_platform_methods
+      plat
+    end
+
+    def connection_for(platform_name, options = { enable_password: "en4ble" })
+      Train::Platforms::Detect.stubs(:scan).returns(detected(platform_name))
+      Train::Transports::SSH.new(conf.merge(options)).connection
+    end
+
+    def ssh_options(connection)
+      connection.instance_variable_get(:@ssh_options)
+    end
+
+    it "uses the Cisco IOS connection, with the enable password, for IOS and IOS XE" do
+      %w{cisco_ios cisco_ios_xe}.each do |name|
+        connection = connection_for(name)
+
+        _(connection).must_be_kind_of Train::Transports::SSH::CiscoIOSConnection
+        _(connection.instance_variable_get(:@enable_password)).must_equal "en4ble"
+      end
+    end
+
+    it "keeps the plain SSH connection for NX-OS" do
+      _(connection_for("cisco_nexus")).must_be_instance_of Train::Transports::SSH::Connection
+    end
+
+    it "connects to the host as the user with the password" do
+      connection = connection_for("cisco_ios_xe")
+
+      _(connection.uri).must_equal "ssh://root@#{conf[:host]}:22"
+      _(ssh_options(connection)[:password]).must_equal conf[:password]
+    end
+
+    it "takes the sudo password as the enable password when no enable password is given" do
+      connection = connection_for("cisco_ios_xe", sudo_password: "sud0")
+
+      _(connection.instance_variable_get(:@enable_password)).must_equal "sud0"
+    end
+
+    it "connects on the port given" do
+      connection = connection_for("cisco_ios_xe", port: 2222)
+
+      _(connection.uri).must_equal "ssh://root@#{conf[:host]}:2222"
+      _(ssh_options(connection)[:port]).must_equal 2222
+    end
+
+    it "connects through the proxy command" do
+      proxy = ssh_options(connection_for("cisco_ios_xe"))[:proxy]
+
+      _(proxy).must_be_kind_of Net::SSH::Proxy::Command
+      _(proxy.command_line_template).must_equal conf[:proxy_command]
+    end
+
+    it "connects through the bastion host" do
+      Train::Platforms::Detect.stubs(:scan).returns(detected("cisco_ios_xe"))
+      bastion = { host: rand.to_s, password: rand.to_s, bastion_host: "bastion_dummy", bastion_user: "jump", bastion_port: 2200 }
+      proxy = ssh_options(Train::Transports::SSH.new(bastion).connection)[:proxy]
+
+      _(proxy).must_be_kind_of Net::SSH::Proxy::Command
+      _(proxy.command_line_template).must_match(/ jump@bastion_dummy -p 2200 -W %h:%p\z/)
+    end
+
+    it "keeps the platform detected over the first connection" do
+      platform = detected("cisco_ios_xe")
+      Train::Platforms::Detect.expects(:scan).once.returns(platform)
+      connection = Train::Transports::SSH.new(conf).connection
+
+      _(connection.platform).must_be_same_as platform
+      _(platform.backend).must_be_same_as connection
+    end
+
+    it "closes the connection used for detection" do
+      Train::Transports::SSH::Connection.any_instance.expects(:close).once
+      connection_for("cisco_ios_xe")
+    end
+  end
+
   describe "opening a connection" do
     let(:ssh) { cls.new(conf) }
     let(:connection) { ssh.connection }

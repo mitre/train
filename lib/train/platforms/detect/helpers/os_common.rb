@@ -83,36 +83,67 @@ module Train::Platforms::Detect::Helpers
       @cache[:brocade] = m && { version: m[1], type: "fos" }
     end
 
+    # The IOS line of `show version`: "Cisco IOS Software, ...", with a release tag on IOS XE
+    # 16 and later ("Cisco IOS Software [Everest], ...", "[IOSXE]", even "[]"), or the 12.x
+    # form "IOS (tm) ...". It names the image in parentheses and then the version.
+    # Neither pattern is anchored to the start of a line: the first command of a session can
+    # carry a MOTD or exec banner that ends without a newline, glued to the line. The version
+    # stops at a space, comma or line end (CRLF over SSH).
+    CISCO_IOS_LINE = /(?:Cisco IOS Software(?: \[(?<tag>[^\]]*)\])?,|IOS \(tm\)) (?<description>.*?) ?\((?<image>[^)]+)\),? +(?:Experimental )?Version (?<version>[^\s,]+)/.freeze
+    CISCO_IOS_XE_LINE = /Cisco IOS XE Software, Version (?<version>[^\s,]+)/.freeze
+    CISCO_IOS_XE_NOTICE = /Cisco IOS-XE software, Copyright/.freeze
+
+    # Decides the Cisco platform by markers rather than by the wording of one line, which
+    # changes between products and releases: NX-OS first, then IOS XE if any IOS XE marker
+    # is present (see cisco_ios_xe?), otherwise IOS.
     def cisco_show_version
       return @cache[:cisco] if @cache.key?(:cisco)
 
       res = command_output("show version")
-
-      m = res.match(/Cisco IOS Software, [^,]+? \(([^,]+?)\), Version (\d+\.\d+)/)
-      unless m.nil?
-        return @cache[:cisco] = { version: m[2], model: m[1], type: "ios" }
-      end
-
-      m = res.match(/Cisco IOS Software, IOS-XE Software, [^,]+? \(([^,]+?)\), Version (\d+\.\d+\.\d+[A-Z]*)/)
-      unless m.nil?
-        return @cache[:cisco] = { version: m[2], model: m[1], type: "ios-xe" }
-      end
-
-      # CSR 1000V (for example) does not specify model
-      m = res.match(/Cisco IOS XE Software, Version (\d+\.\d+\.\d+[A-Z]*)/)
-      unless m.nil?
-        return @cache[:cisco] = { version: m[1], type: "ios-xe" }
-      end
-
-      m = res.match(/Cisco Nexus Operating System \(NX-OS\) Software/)
-      unless m.nil?
-        v = res[/^\s*system:\s+version (\d+\.\d+)/, 1]
-        v ||= res[/NXOS: version (\d+\.\d+)/, 1]
-        return @cache[:cisco] = { version: v, type: "nexus" }
-      end
-
-      @cache[:cisco] = nil
+      @cache[:cisco] = cisco_nexus_version(res) || cisco_ios_version(res)
     end
+
+    def cisco_nexus_version(res)
+      return unless res.match?(/Cisco Nexus Operating System \(NX-OS\) Software/)
+
+      v = res[/^\s*system:\s+version (\d+\.\d+)/, 1]
+      v ||= res[/NXOS: version (\d+\.\d+)/, 1]
+      { version: v, type: "nexus" }
+    end
+
+    # Release: IOS XE takes the version of its "Cisco IOS XE Software, Version" line when that
+    # is numeric (a development build shows a BLD_ label there), else the IOS line's; IOS
+    # keeps major.minor. As before, an IOS XE release keeps uppercase train letters joined to
+    # the third number (03.03.03SE) and drops anything else after it (".SG", "b.S", "a",
+    # "prd21"). On a 3.x development build the IOS XE line carries a BLD_ label and the IOS
+    # line an IOSd 15.x version, so the release reported is the IOSd one.
+    # Without a numeric release there is no platform.
+    def cisco_ios_version(res)
+      ios = res.match(CISCO_IOS_LINE)
+      xe = res.match(CISCO_IOS_XE_LINE)
+      return if ios.nil? && xe.nil?
+
+      model = ios && ios[:image]
+      unless cisco_ios_xe?(res, ios, xe)
+        version = ios[:version][/\A\d+\.\d+/]
+        return version && { version: version, model: model, type: "ios" }
+      end
+
+      version = xe && xe[:version][/\A\d+\.\d+\.\d+[A-Z]*/]
+      version ||= ios && ios[:version][/\A\d+\.\d+(?:\.\d+[A-Z]*)?/]
+      version && { version: version, model: model, type: "ios-xe" }
+    end
+
+    # IOS XE markers: a "Cisco IOS XE Software" line (16.x and later); a release tag on the
+    # IOS line, which classic IOS never prints; "IOS-XE Software" on the IOS line (3.x); the
+    # "Cisco IOS-XE software, Copyright" notice (3.x and later).
+    def cisco_ios_xe?(res, ios, xe)
+      return true if xe
+      return true if ios && (ios[:tag] || ios[:description].start_with?("IOS-XE Software"))
+
+      res.match?(CISCO_IOS_XE_NOTICE)
+    end
+    private :cisco_nexus_version, :cisco_ios_version, :cisco_ios_xe?
 
     def unix_uuid
       (unix_uuid_from_chef         ||

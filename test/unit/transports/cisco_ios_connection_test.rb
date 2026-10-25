@@ -1,6 +1,100 @@
 require "helper"
 require "train/transports/ssh"
 
+# An IOS exec shell on the far end of the SSH channel, as an IOL router answers over SSH:
+# every carriage return or line feed is an Enter, each Enter's reply arrives as its own
+# chunk, and the connection only sees a chunk when it processes the channel. A secret of
+# nil is a router with no enable secret (a vty refuses enable); :none is an enable that
+# asks for no password.
+class FakeIOSShell
+  attr_reader :lines
+
+  def initialize(connection, privilege:, secret:)
+    @connection = connection
+    @privilege = privilege
+    @secret = secret
+    @password_attempts = nil
+    @line = +""
+    @lines = []
+    @chunks = ["\r\n\r\n\r\n#{prompt}"]
+  end
+
+  def send_data(data)
+    data.each_char do |char|
+      if ["\r", "\n"].include?(char)
+        enter
+      else
+        @line << char
+      end
+    end
+  end
+
+  def connection
+    self
+  end
+
+  def unread_replies
+    @chunks.size
+  end
+
+  def asking_for_password?
+    !@password_attempts.nil?
+  end
+
+  def process(_timeout)
+    raise "the device has nothing more to send" if @chunks.empty?
+
+    @connection.instance_variable_set(:@buf, @connection.instance_variable_get(:@buf) + @chunks.shift)
+  end
+
+  private
+
+  def prompt
+    @privilege == 15 ? "R1#" : "R1>"
+  end
+
+  def enter
+    line = @line
+    @line = +""
+    @lines << line
+    @chunks << (@password_attempts ? password(line) : command(line))
+  end
+
+  # Passwords are not echoed. Three wrong tries return to user EXEC.
+  def password(line)
+    if line == @secret
+      @password_attempts = nil
+      @privilege = 15
+      return "\r\n#{prompt}"
+    end
+
+    @password_attempts += 1
+    return "\r\nPassword: " if @password_attempts < 3
+
+    @password_attempts = nil
+    "\r\n% Bad secrets\r\n\r\n#{prompt}"
+  end
+
+  def command(line)
+    case line
+    when "enable"
+      return "enable\r\n% No password set\r\n#{prompt}" if @secret.nil?
+
+      @privilege = 15 if @secret == :none
+      return "enable\r\n#{prompt}" if @privilege == 15
+
+      @password_attempts = 0
+      "enable\r\nPassword: "
+    when "show privilege"
+      "#{line}\r\nCurrent privilege level is #{@privilege}\r\n#{prompt}"
+    when "show clock"
+      "#{line}\r\n16:26:00.000 UTC Sun Oct 25 2026\r\n#{prompt}"
+    else
+      "#{line}\r\n#{prompt}"
+    end
+  end
+end
+
 describe "CiscoIOSConnection" do
   before do
     # This is to skip the test on windows as bundle exec rake is giving eror ArgumentError: non-absolute home
@@ -33,6 +127,54 @@ describe "CiscoIOSConnection" do
   describe "#initialize" do
     it "provides a uri" do
       _(connection.uri).must_equal "ssh://fakeuser@fakehost:22"
+    end
+  end
+
+  describe "enable mode" do
+    def connect(privilege:, enable_password: "s3cret", secret: "s3cret")
+      conn = cls.new(opts.merge(enable_password: enable_password)).connection
+      shell = FakeIOSShell.new(conn, privilege: privilege, secret: secret)
+      conn.stubs(:establish_connection)
+      conn.stubs(:open_channel).returns(shell)
+      [conn, shell]
+    end
+
+    it "enters enable mode and gives each command its own reply" do
+      conn, = connect(privilege: 1)
+
+      _(conn.run_command("show privilege").stdout).must_equal "Current privilege level is 15"
+      _(conn.run_command("show clock").stdout).must_equal "16:26:00.000 UTC Sun Oct 25 2026"
+      _(conn.run_command("show privilege").stdout).must_equal "Current privilege level is 15"
+    end
+
+    it "does not type enable when the session is already privileged" do
+      conn, shell = connect(privilege: 15)
+
+      _(conn.run_command("show privilege").stdout).must_equal "Current privilege level is 15"
+      _(shell.lines).wont_include "enable"
+    end
+
+    it "enters enable mode without typing the password when enable asks for none" do
+      conn, shell = connect(privilege: 1, secret: :none)
+
+      _(conn.run_command("show privilege").stdout).must_equal "Current privilege level is 15"
+      _(shell.lines).wont_include "s3cret"
+    end
+
+    it "raises with the router's answer when it refuses enable" do
+      conn, shell = connect(privilege: 1, secret: nil)
+
+      error = _ { conn.run_command("show privilege") }.must_raise Train::Transports::SSH::CiscoIOSConnection::BadEnablePassword
+      _(error.message).must_include "% No password set"
+      _(shell.lines).wont_include "s3cret"
+    end
+
+    it "raises on a wrong enable password and leaves the session at user EXEC with nothing unread" do
+      conn, shell = connect(privilege: 1, enable_password: "wrong")
+
+      _ { conn.run_command("show privilege") }.must_raise Train::Transports::SSH::CiscoIOSConnection::BadEnablePassword
+      _(shell.asking_for_password?).must_equal false
+      _(shell.unread_replies).must_equal 0
     end
   end
 

@@ -391,6 +391,73 @@ describe "os_detect" do
       _(platform[:release]).must_equal("03.03.03SE")
     end
 
+    # Real `show version` lines and the platform each should give. Rows marked "genie" are
+    # from Cisco's genieparser golden ShowVersion outputs (Apache-2.0,
+    # https://github.com/CiscoTestAutomation/genieparser, src/genie/libs/parser/{ios,iosxe}/
+    # tests/ShowVersion/cli/equal/<file>); the Catalyst 9300 rows are from Cisco's 17.14
+    # release notes; the IOL rows are from Cisco Modeling Labs IOL nodes.
+    cisco_banners = [
+      ["IOL router (17.15)", "Cisco IOS Software [IOSXE], Linux Software (X86_64BI_LINUX-ADVENTERPRISEK9-M), Version 17.15.1, RELEASE SOFTWARE (fc4)", "cisco_ios_xe", "17.15.1"],
+      ["Catalyst 9300 17.13 (release notes)", "Cisco IOS XE Software, Version 17.13.01\nCisco IOS Software [Dublin], Catalyst L3 Switch Software (CAT9K_IOSXE), Version 17.13.1, RELEASE SOFTWARE (fc1)", "cisco_ios_xe", "17.13.01"],
+      ["Catalyst 9300 17.14 (release notes)", "Cisco IOS XE Software, Version 17.14.01\nCisco IOS Software, Catalyst L3 Switch Software (CAT9K_IOSXE), Version 17.14.1, RELEASE SOFTWARE (fc1)", "cisco_ios_xe", "17.14.01"],
+      ["C8000V dev build (genie golden_output_c8000v)", "Cisco IOS XE Software, Version BLD_POLARIS_DEV_LATEST_20240326_003112\nCisco IOS Software [IOSXE], Virtual XE Software (X86_64_LINUX_IOSD-UNIVERSALK9-M), Experimental Version 17.15.20240326:010319 [BLD_POLARIS_DEV_LATEST_20240326_003112:/nobackup/mcpre/s2c-build-ws 101]\nCisco IOS-XE software, Copyright (c) 2005-2024 by cisco Systems, Inc.", "cisco_ios_xe", "17.15.20240326"],
+      ["C3850 [Everest], no IOS XE line (genie golden_output_c3850)", "Cisco IOS Software [Everest], Catalyst L3 Switch Software (CAT3K_CAA-UNIVERSALK9-M), Experimental Version 16.4.20170410:165034 [v164_throttle-BLD-BLD_V164_THROTTLE_LATEST_20170410_174845 105]\nCisco IOS-XE software, Copyright (c) 2005-2017 by cisco Systems, Inc.", "cisco_ios_xe", "16.4.20170410"],
+      ["empty release tag (genie golden_output_8)", "Cisco IOS XE Software, Version BLD_POLARIS_DEV_LATEST_20211003_004933\nCisco IOS Software [], Catalyst L3 Switch Software (CAT9K_IOSXE), Experimental Version 17.8.20211003:014100 [BLD_POLARIS_DEV_LATEST_20211003_004933:/nobackup/mcpre/s2c-build-ws 100]\nCisco IOS-XE software, Copyright (c) 2005-2021 by cisco Systems, Inc.", "cisco_ios_xe", "17.8.20211003"],
+      ["ISR4k 16.6 (genie golden_output_isr4k)", "Cisco IOS XE Software, Version 16.06.05\nCisco IOS Software [Everest], ISR Software (X86_64_LINUX_IOSD-UNIVERSALK9-M), Version 16.6.5, RELEASE SOFTWARE (fc3)\nCisco IOS-XE software, Copyright (c) 2005-2018 by cisco Systems, Inc.", "cisco_ios_xe", "16.06.05"],
+      ["Catalyst 17.18 [IOSXE] (genie golden_output_standby)", "Cisco IOS XE Software, Version 17.18.01prd21\nCisco IOS Software [IOSXE], Catalyst L3 Switch Software (CAT9K_IOSXE), Version 17.18.1prd21, RELEASE SOFTWARE (fc1)\nCisco IOS-XE software, Copyright (c) 2005-2025 by cisco Systems, Inc.", "cisco_ios_xe", "17.18.01"],
+      ["IOS XE 3.x Catalyst 4500 (genie golden_output_1)", "Cisco IOS Software, IOS-XE Software, Catalyst 4500 L3 Switch  Software (cat4500e-UNIVERSALK9-M), Version 03.04.06.SG RELEASE SOFTWARE (fc1)\nCisco IOS-XE software, Copyright (c) 2005-2010, 2012 by cisco Systems, Inc.", "cisco_ios_xe", "03.04.06"],
+      ["ASR901 15.6 (genie golden_output_asr901)", "Cisco IOS Software, 901 Software (ASR901-UNIVERSALK9-M), Version 15.6(2)SP4, RELEASE SOFTWARE (fc3)", "cisco_ios", "15.6"],
+      ["IOSv 15.6 (genie golden_output_iosv)", "Cisco IOS Software, IOSv Software (VIOS-ADVENTERPRISEK9-M), Version 15.6(3)M2, RELEASE SOFTWARE (fc2)", "cisco_ios", "15.6"],
+      ["IOS 12.1 IOS (tm) (genie golden_output_2)", "Cisco Internetwork Operating System Software \nIOS (tm) C2940 Software (C2940-I6K2L2Q4-M), Version 12.1(22)EA12, RELEASE SOFTWARE (fc1)", "cisco_ios", "12.1"],
+      ["IOS 12.3 IOS (tm) only (genie golden_output_ios_c2600)", "IOS (tm) C2600 Software (C2600-IPBASE-M), Version 12.3(6f), RELEASE SOFTWARE (fc1)", "cisco_ios", "12.3"],
+      # Not a captured banner: an IOS XE whose IOS line carries no tag and that prints no
+      # IOS XE Software line still prints the IOS-XE copyright notice.
+      ["IOS XE line without a tag, notice only (synthetic)", "Cisco IOS Software, Catalyst L3 Switch Software (CAT9K_IOSXE), Version 17.20.1, RELEASE SOFTWARE (fc1)\nCisco IOS-XE software, Copyright (c) 2005-2026 by cisco Systems, Inc.", "cisco_ios_xe", "17.20.1"],
+      # Not a captured banner: an empty release tag with no other IOS XE marker.
+      ["empty release tag alone (synthetic)", "Cisco IOS Software [], Catalyst L3 Switch Software (CAT9K_IOSXE), Version 17.8.1, RELEASE SOFTWARE (fc1)", "cisco_ios_xe", "17.8.1"],
+      # IOS XE 3.x routers pair the IOS XE release with an IOSd 15.x IOS line; the IOS XE
+      # release is the one reported. Line format as printed by a CSR1000V on 3.16.
+      ["CSR1000V IOS XE 3.16", "Cisco IOS XE Software, Version 03.16.07b.S - Extended Support Release\r\nCisco IOS Software, CSR1000V Software (X86_64_LINUX_IOSD-UNIVERSALK9-M), Version 15.5(3)S7b, RELEASE SOFTWARE (fc1)\r\nCopyright (c) 1986-2018 by Cisco Systems, Inc.", "cisco_ios_xe", "03.16.07"],
+      # Over SSH, lines end in CRLF and the version can end the line.
+      ["IOS line ending in CRLF right after the version", "Cisco IOS Software, C3750E Software (C3750E-UNIVERSALK9-M), Version 12.2(58)SE\r\nCopyright (c) 1986-2011 by Cisco Systems, Inc.", "cisco_ios", "12.2"],
+      # The first command of a session can carry a MOTD or exec banner configured without
+      # a trailing newline, glued to the start of the first line.
+      ["IOS line glued to a MOTD banner", "A MOTD BannerCisco IOS Software, C3750E Software (C3750E-UNIVERSALK9-M), Version 12.2(58)SE", "cisco_ios", "12.2"],
+      ["IOS XE line glued to a MOTD banner", "A MOTD BannerCisco IOS XE Software, Version 17.13.01\nCisco IOS Software [Dublin], Catalyst L3 Switch Software (CAT9K_IOSXE), Version 17.13.1, RELEASE SOFTWARE (fc1)", "cisco_ios_xe", "17.13.01"],
+    ]
+
+    cisco_banners.each do |label, show_version, name, release|
+      it "recognizes #{label} as #{name} #{release}" do
+        mock = Train::Transports::Mock::Connection.new
+        mock.mock_command("show version", show_version)
+        platform = Train::Platforms::Detect.scan(mock)
+
+        _(platform[:name]).must_equal(name)
+        _(platform[:family]).must_equal("cisco")
+        _(platform[:release]).must_equal(release)
+      end
+    end
+
+    it "does not report a Cisco platform without a numeric release" do
+      without_release = [
+        "Cisco IOS XE Software, Version BLD_POLARIS_DEV_LATEST_20240326_003112\n",
+        "Cisco IOS Software, C3750E Software (C3750E-UNIVERSALK9-M), Version BLD_V122_LATEST\n",
+      ]
+      without_release.each do |show_version|
+        mock = Train::Transports::Mock::Connection.new
+        mock.mock_command("show version", show_version)
+
+        _ { Train::Platforms::Detect.scan(mock) }.must_raise(Train::PlatformDetectionFailed)
+      end
+    end
+
+    it "does not take other vendors' show version for Cisco" do
+      mock = Train::Transports::Mock::Connection.new
+      mock.mock_command("show version", "Arista DCS-7050TX-64-R\nSoftware image version: 4.22.1F\n")
+
+      _ { Train::Platforms::Detect.scan(mock) }.must_raise(Train::PlatformDetectionFailed)
+    end
+
     it "recognizes Cisco Nexus" do
       mock = Train::Transports::Mock::Connection.new
       mock.mock_command("show version", "Cisco Nexus Operating System (NX-OS) Software\n  system:      version 5.2(1)N1(8b)\n")
