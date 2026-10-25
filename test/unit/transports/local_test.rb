@@ -182,4 +182,218 @@ describe "local transport" do
       connection.run_command("not actually executed")
     end
   end
+
+  describe "WindowsPipeRunner" do
+    let(:pipe_runner_class) { Train::Transports::Local::Connection::WindowsPipeRunner }
+
+    describe "#current_windows_user" do
+      let(:runner) do
+        pipe_runner_class.allocate.tap do |r|
+          r.instance_variable_set(:@powershell_cmd, "powershell")
+        end
+      end
+
+      it "returns user from WindowsIdentity when available" do
+        runner.expects(:`).with('powershell -Command "[System.Security.Principal.WindowsIdentity]::GetCurrent().Name"').returns("DOMAIN\\testuser\n")
+        result = runner.send(:current_windows_user)
+        _(result).must_equal "DOMAIN\\testuser"
+      end
+
+      it "falls back to whoami when WindowsIdentity returns empty" do
+        runner.expects(:`).with('powershell -Command "[System.Security.Principal.WindowsIdentity]::GetCurrent().Name"').returns("\n")
+        runner.expects(:`).with("whoami").returns("domain\\fallbackuser\n")
+        result = runner.send(:current_windows_user)
+        _(result).must_equal "domain\\fallbackuser"
+      end
+
+      it "falls back to whoami when WindowsIdentity returns nil-like value" do
+        runner.expects(:`).with('powershell -Command "[System.Security.Principal.WindowsIdentity]::GetCurrent().Name"').returns("")
+        runner.expects(:`).with("whoami").returns("localuser\n")
+        result = runner.send(:current_windows_user)
+        _(result).must_equal "localuser"
+      end
+
+      it "raises error when both methods fail to return a user" do
+        runner.expects(:`).with('powershell -Command "[System.Security.Principal.WindowsIdentity]::GetCurrent().Name"').returns("")
+        runner.expects(:`).with("whoami").returns("")
+        _ { runner.send(:current_windows_user) }.must_raise RuntimeError
+      end
+    end
+
+    describe "#pipe_owned_by_current_user?" do
+      let(:runner) do
+        pipe_runner_class.allocate.tap do |r|
+          r.instance_variable_set(:@powershell_cmd, "powershell")
+        end
+      end
+
+      it "returns [nil, current_user, false] when pipe does not exist" do
+        runner.expects(:`).with('powershell -Command "Test-Path \\\\.\\pipe\\test_pipe"').returns("false\n")
+        runner.expects(:current_windows_user).returns("DOMAIN\\testuser")
+        owner, current_user, is_owner = runner.send(:pipe_owned_by_current_user?, "test_pipe")
+        _(owner).must_be_nil
+        _(current_user).must_equal "DOMAIN\\testuser"
+        _(is_owner).must_equal false
+      end
+
+      it "returns [owner, current_user, true] when pipe exists and is owned by current user" do
+        runner.expects(:`).with('powershell -Command "Test-Path \\\\.\\pipe\\test_pipe"').returns("true\n")
+        runner.expects(:current_windows_user).returns("DOMAIN\\testuser")
+        runner.expects(:`).with('powershell -Command "(Get-Acl \\\\.\\pipe\\test_pipe).Owner" 2>&1').returns("DOMAIN\\testuser\n")
+        owner, current_user, is_owner = runner.send(:pipe_owned_by_current_user?, "test_pipe")
+        _(owner).must_equal "DOMAIN\\testuser"
+        _(current_user).must_equal "DOMAIN\\testuser"
+        _(is_owner).must_equal true
+      end
+
+      it "returns [owner, current_user, false] when pipe is owned by different user" do
+        runner.expects(:`).with('powershell -Command "Test-Path \\\\.\\pipe\\test_pipe"').returns("true\n")
+        runner.expects(:current_windows_user).returns("DOMAIN\\testuser")
+        runner.expects(:`).with('powershell -Command "(Get-Acl \\\\.\\pipe\\test_pipe).Owner" 2>&1').returns("DOMAIN\\otheruser\n")
+        owner, current_user, is_owner = runner.send(:pipe_owned_by_current_user?, "test_pipe")
+        _(owner).must_equal "DOMAIN\\otheruser"
+        _(current_user).must_equal "DOMAIN\\testuser"
+        _(is_owner).must_equal false
+      end
+
+      it "performs case-insensitive comparison for ownership" do
+        runner.expects(:`).with('powershell -Command "Test-Path \\\\.\\pipe\\test_pipe"').returns("true\n")
+        runner.expects(:current_windows_user).returns("domain\\TESTUSER")
+        runner.expects(:`).with('powershell -Command "(Get-Acl \\\\.\\pipe\\test_pipe).Owner" 2>&1').returns("DOMAIN\\testuser\n")
+        _owner, _current_user, is_owner = runner.send(:pipe_owned_by_current_user?, "test_pipe")
+        _(is_owner).must_equal true
+      end
+    end
+
+    describe "#acquire_pipe" do
+      let(:runner) do
+        pipe_runner_class.allocate.tap do |r|
+          r.instance_variable_set(:@powershell_cmd, "powershell")
+          r.instance_variable_set(:@server_pid, nil)
+        end
+      end
+
+      before do
+        runner.stubs(:require).with("win32/process").returns(true)
+      end
+
+      it "raises PipeError when pipe is owned by unauthorized user" do
+        runner.expects(:start_pipe_server).with(anything).returns(12345)
+        runner.expects(:pipe_owned_by_current_user?).with(anything).returns(["DOMAIN\\otheruser", "DOMAIN\\testuser", false])
+        runner.stubs(:close)
+
+        _ { runner.send(:acquire_pipe) }.must_raise Train::Transports::Local::PipeError
+      end
+
+      it "waits for pipe to be created before verifying ownership" do
+        mock_pipe = mock("pipe")
+        runner.expects(:start_pipe_server).with(anything).returns(12345)
+        runner.expects(:pipe_owned_by_current_user?).with(anything).twice.returns(
+          [nil, "DOMAIN\\testuser", false],
+          ["DOMAIN\\testuser", "DOMAIN\\testuser", true]
+        )
+        runner.expects(:open).with(anything, "r+").returns(mock_pipe)
+        runner.stubs(:close)
+
+        result = runner.send(:acquire_pipe)
+        _(result).must_equal mock_pipe
+      end
+    end
+
+    describe "#acquire_pipe retry behavior" do
+      let(:runner) do
+        pipe_runner_class.allocate.tap do |r|
+          r.instance_variable_set(:@powershell_cmd, "powershell")
+          r.instance_variable_set(:@server_pid, nil)
+        end
+      end
+
+      before do
+        runner.stubs(:require).with("win32/process").returns(true)
+        runner.stubs(:sleep)
+      end
+
+      it "retries when pipe is not immediately available" do
+        mock_pipe = mock("pipe")
+        runner.expects(:start_pipe_server).returns(12345)
+        runner.expects(:pipe_owned_by_current_user?).times(3).returns(
+          [nil, "DOMAIN\\user", false],
+          [nil, "DOMAIN\\user", false],
+          ["DOMAIN\\user", "DOMAIN\\user", true]
+        )
+        runner.expects(:open).returns(mock_pipe)
+
+        result = runner.send(:acquire_pipe)
+        _(result).must_equal mock_pipe
+      end
+
+      it "retries when pipe open fails transiently" do
+        mock_pipe = mock("pipe")
+        runner.expects(:start_pipe_server).returns(12345)
+        runner.expects(:pipe_owned_by_current_user?).returns(
+          ["DOMAIN\\user", "DOMAIN\\user", true]
+        )
+
+        open_attempts = 0
+        runner.stubs(:open).with { |path, mode|
+          open_attempts += 1
+          if open_attempts < 3
+            raise Errno::ENOENT
+          end
+
+          true
+        }.returns(mock_pipe)
+
+        result = runner.send(:acquire_pipe)
+        _(result).must_equal mock_pipe
+      end
+
+      it "returns nil after exhausting all retries" do
+        runner.expects(:start_pipe_server).returns(12345)
+        runner.expects(:pipe_owned_by_current_user?).at_least_once.returns([nil, "DOMAIN\\user", false])
+
+        result = runner.send(:acquire_pipe)
+        _(result).must_be_nil
+      end
+    end
+
+    describe "#run_command pipe recovery" do
+      let(:runner) do
+        pipe_runner_class.allocate.tap do |r|
+          r.instance_variable_set(:@powershell_cmd, "powershell")
+          r.instance_variable_set(:@server_pid, 12345)
+        end
+      end
+
+      it "retries with new pipe when Errno::EPIPE occurs" do
+        old_pipe = mock("old_pipe")
+        new_pipe = mock("new_pipe")
+        runner.instance_variable_set(:@pipe, old_pipe)
+
+        old_pipe.expects(:puts).raises(Errno::EPIPE)
+        runner.expects(:close).once
+        runner.expects(:acquire_pipe).returns(new_pipe)
+
+        new_pipe.expects(:puts).with(anything)
+        new_pipe.expects(:flush)
+        new_pipe.expects(:readline).returns(Base64.encode64('{"stdout":"ok","stderr":"","exitstatus":0}'))
+
+        result = runner.run_command("test-command", {})
+
+        _(result.stdout).must_equal "ok"
+        _(result.exit_status).must_equal 0
+      end
+
+      it "raises PipeError when recovery fails" do
+        old_pipe = mock("old_pipe")
+        runner.instance_variable_set(:@pipe, old_pipe)
+
+        old_pipe.expects(:puts).raises(Errno::EPIPE)
+        runner.expects(:close).once
+        runner.expects(:acquire_pipe).returns(nil)
+
+        _ { runner.run_command("test-command", {}) }.must_raise Train::Transports::Local::PipeError
+      end
+    end
+  end
 end

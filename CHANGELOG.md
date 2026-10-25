@@ -1,18 +1,72 @@
-<!-- latest_release 3.13.0 -->
-## [v3.13.0](https://github.com/inspec/train/tree/v3.13.0) (2025-05-22)
-
-#### Merged Pull Requests
-- CHEF-19301-Ruby 3.4.x Upgrade [#787](https://github.com/inspec/train/pull/787) ([balasubramanian-s](https://github.com/balasubramanian-s))
+<!-- latest_release -->
 <!-- latest_release -->
 
-<!-- release_rollup since=3.12.13 -->
-### Changes not yet released to rubygems.org
-
-#### Merged Pull Requests
-- CHEF-19301-Ruby 3.4.x Upgrade [#787](https://github.com/inspec/train/pull/787) ([balasubramanian-s](https://github.com/balasubramanian-s)) <!-- 3.13.0 -->
+<!-- release_rollup -->
 <!-- release_rollup -->
 
 <!-- latest_stable_release -->
+## [v3.16.5](https://github.com/inspec/train/tree/v3.16.5) (2026-06-11)
+
+#### Merged Pull Requests
+- fix: pin bigdecimal to &lt; 4 to avoid broken transitive installs via activesupport [#833](https://github.com/inspec/train/pull/833) ([chandra-progress](https://github.com/chandra-progress))
+- fix: CHEF-33393 - Fall back to PowerShell syntax for arch detection in WinRM sessions [#832](https://github.com/inspec/train/pull/832) ([Nik08](https://github.com/Nik08))
+<!-- latest_stable_release -->
+
+## [v3.16.3](https://github.com/inspec/train/tree/v3.16.3) (2026-04-28)
+
+#### Merged Pull Requests
+- chore: Bump activesupport minimum version to 7.2.3.1 [#830](https://github.com/inspec/train/pull/830) ([mohan-progress](https://github.com/mohan-progress))
+
+## [v3.16.2](https://github.com/inspec/train/tree/v3.16.2) (2026-04-20)
+
+#### Merged Pull Requests
+- Upgrade json gem version [#829](https://github.com/inspec/train/pull/829) ([chandra-progress](https://github.com/chandra-progress))
+
+## [v3.16.1](https://github.com/inspec/train/tree/v3.16.1) (2026-01-20)
+
+#### Merged Pull Requests
+- Handle exceptions during pipe connection wait in WindowsPipeRunner [#821](https://github.com/inspec/train/pull/821) ([sathish-progress](https://github.com/sathish-progress))
+
+## [v3.16.0](https://github.com/inspec/train/tree/v3.16.0) (2026-01-14)
+
+#### Merged Pull Requests
+- CHEF-19255 Fix pipe broken issue [#818](https://github.com/inspec/train/pull/818) ([sathish-progress](https://github.com/sathish-progress))
+
+## [v3.15.2](https://github.com/inspec/train/tree/v3.15.2) (2026-01-09)
+
+#### Merged Pull Requests
+- Update ostruct dep version [#819](https://github.com/inspec/train/pull/819) ([Stromweld](https://github.com/Stromweld))
+
+## [v3.15.1](https://github.com/inspec/train/tree/v3.15.1) (2025-12-23)
+
+#### Merged Pull Requests
+- Revert &quot;CHEF-19255 Fix named pipes to be more secure&quot; [#817](https://github.com/inspec/train/pull/817) ([sathish-progress](https://github.com/sathish-progress))
+
+## [v3.15.0](https://github.com/inspec/train/tree/v3.15.0) (2025-12-22)
+
+#### Merged Pull Requests
+- CHEF-19255 Fix named pipes to be more secure [#797](https://github.com/inspec/train/pull/797) ([sa-progress](https://github.com/sa-progress))
+
+## [v3.14.1](https://github.com/inspec/train/tree/v3.14.1) (2025-12-18)
+
+#### Merged Pull Requests
+- Update ffi dependency to allow versions &gt;= 1.16.0 and &lt; 1.18 [#814](https://github.com/inspec/train/pull/814) ([sathish-progress](https://github.com/sathish-progress))
+- os detection: add chainguard/wolfi linux distro [#812](https://github.com/inspec/train/pull/812) ([stevebeattie](https://github.com/stevebeattie))
+
+## [v3.13.4](https://github.com/inspec/train/tree/v3.13.4) (2025-08-20)
+
+#### Merged Pull Requests
+- CHEF-21404 Enable CI for trufflelog scanning [#798](https://github.com/inspec/train/pull/798) ([Nik08](https://github.com/Nik08))
+- CHEF-24661 - standardize - inspec/train - spurious_file_check [#800](https://github.com/inspec/train/pull/800) ([cgunasree08](https://github.com/cgunasree08))
+- upgrade `train-winrm` [#802](https://github.com/inspec/train/pull/802) ([sathish-progress](https://github.com/sathish-progress))
+
+## [v3.13.2](https://github.com/inspec/train/tree/v3.13.2) (2025-06-19)
+
+#### Merged Pull Requests
+- CHEF-19301-Ruby 3.4.x Upgrade [#787](https://github.com/inspec/train/pull/787) ([balasubramanian-s](https://github.com/balasubramanian-s))
+- Version pinned train-winrm with Ruby3.4.x changes [#796](https://github.com/inspec/train/pull/796) ([Nik08](https://github.com/Nik08))
+- revert back to the old constraint to use greater than 1.16.0 ffi gem [#794](https://github.com/inspec/train/pull/794) ([sathish-progress](https://github.com/sathish-progress))
+
 ## [v3.12.13](https://github.com/inspec/train/tree/v3.12.13) (2025-04-30)
 
 #### Merged Pull Requests
@@ -24,7 +78,6 @@
 - chore: update comment for clarity [#791](https://github.com/inspec/train/pull/791) ([ahasunos](https://github.com/ahasunos))
 - pin: update pinning of activesupport in gemspec file [#792](https://github.com/inspec/train/pull/792) ([ahasunos](https://github.com/ahasunos))
 - CHEF-20278: Enhance `windows_uuid_from_wmic` to use `/value` flag for reliable UUID retrieval [#789](https://github.com/inspec/train/pull/789) ([ahasunos](https://github.com/ahasunos))
-<!-- latest_stable_release -->
 
 ## [v3.12.7](https://github.com/inspec/train/tree/v3.12.7) (2024-08-22)
 

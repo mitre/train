@@ -28,9 +28,11 @@ Gem::Specification.new do |spec|
   spec.require_paths = ["lib"]
 
   spec.add_dependency "train-core", "= #{Train::VERSION}"
-  spec.add_dependency "train-winrm", "~> 0.2.19" # This version is required for Ruby 3.0 compatibility
+  spec.add_dependency "train-winrm", "~> 0.4.0" # Ruby 3.4 upgrade included
 
-  spec.add_dependency "activesupport", "~> 7.2", ">= 7.2.2.1"
+  spec.add_dependency "activesupport", "~> 7.2", ">= 7.2.3.1"
+  # bigdecimal 4.x is incompatible to el-7-aarch64, el-7-x86_64; pin to < 4 to avoid broken transitive installs via activesupport
+  spec.add_dependency "bigdecimal", "< 4"
 
   # azure, docker, gcp dependencies
   spec.add_dependency "inifile", "~> 3.0"
@@ -49,5 +51,5 @@ Gem::Specification.new do |spec|
   spec.add_dependency "google-apis-storage_v1", "~> 0.30.0"
   spec.add_dependency "google-apis-iam_v1", "~> 0.50.0"
   # Gem dependency needed with Ruby 3.4 upgrade
-  spec.add_dependency "ostruct", "~> 0.1.0"
+  spec.add_dependency "ostruct", "~> 0.6.0"
 end
