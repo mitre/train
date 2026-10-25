@@ -42,7 +42,7 @@ describe "CiscoIOSConnection" do
       Train::Transports::SSH::CiscoIOSConnection.any_instance
         .expects(:run_command_via_connection)
         .with("show version | include Processor")
-        .returns(OpenStruct.new(stdout: output))
+        .returns(Train::Extras::CommandResult.new(output, "", 0))
       _(connection.unique_identifier).must_equal("1111111111")
     end
   end
