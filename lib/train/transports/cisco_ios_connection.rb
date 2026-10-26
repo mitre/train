@@ -69,9 +69,6 @@ class Train::Transports::SSH
 
     private
 
-    # Seconds a command may take in total, as Netmiko's read_timeout; run_command's :timeout
-    # (InSpec's --command-timeout) overrides it.
-    READ_TIMEOUT = 10
     # A prompt at the end of what the device sent: > or # last on its line. A banner's border
     # line ("##########") ends in a line break, not in #.
     PROMPT_END = /[>#][ \t]*\z/.freeze
@@ -177,7 +174,7 @@ class Train::Transports::SSH
       logger.debug("[SSH] Running `#{cmd}` on #{self}")
       session
       reset_closed_session
-      format_result(send_command(cmd, opts[:timeout] || READ_TIMEOUT, Train::CommandTimeoutReached))
+      format_result(send_command(cmd, opts[:timeout], Train::CommandTimeoutReached))
     rescue Net::SSH::Exception, IOError, SystemCallError => e
       raise Train::Transports::SSHFailed, "SSH command failed (#{e.message})"
     end
@@ -205,9 +202,11 @@ class Train::Transports::SSH
 
     # As Netmiko's send_command: type the command with one Enter, read its echo, then read to
     # the device's own prompt at the end of the output. Anything before the echo, such as a
-    # prompt still in flight from the previous command, is not part of the output. A command
-    # that does not finish within `timeout` seconds raises `error` and drops the session, so
-    # its late output cannot answer a later command; so does losing the connection.
+    # prompt still in flight from the previous command, is not part of the output. As on
+    # SSH::Connection, a command has no time limit unless run_command is given :timeout
+    # (InSpec's --command-timeout); one that does not finish within `timeout` seconds raises
+    # `error` and drops the session, so its late output cannot answer a later command; so
+    # does losing the connection.
     def send_command(cmd, timeout, error)
       @idle = false
       @buf = +""
@@ -228,12 +227,12 @@ class Train::Transports::SSH
       raise
     end
 
-    # Processes the channel until the block is true, for at most `timeout` seconds in total.
-    # `what` names the step in the error and must not hold a secret.
+    # Processes the channel until the block is true, for at most `timeout` seconds in total
+    # when a timeout is given. `what` names the step in the error and must not hold a secret.
     def read_until(timeout, what, error)
-      deadline = monotonic_now + timeout
+      deadline = timeout && monotonic_now + timeout
       until yield
-        raise error, "#{what} reached timeout (#{timeout}s)" if monotonic_now > deadline
+        raise error, "#{what} reached timeout (#{timeout}s)" if deadline && monotonic_now > deadline
 
         @session.connection.process(0.1)
       end

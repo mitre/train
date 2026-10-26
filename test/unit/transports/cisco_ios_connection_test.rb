@@ -443,13 +443,13 @@ describe "CiscoIOSConnection" do
       _(output.size).must_be :>, 7_000_000
     end
 
-    it "gives a command 10 seconds by default" do
-      conn, = connect(privilege: 15, stall_on: "show clock")
+    it "waits for a slow command as long as it takes when no timeout is given, as the SSH connection does" do
+      conn, = connect(privilege: 15, late: { "show clock" => 0.3 })
       conn.run_command("show privilege")
+      # Each look at the clock is 5 s later than the last: a default limit of any size would fire.
       conn.stubs(:monotonic_now).returns(0, *(1..400).map { |n| n * 5.0 })
 
-      error = _ { conn.run_command("show clock") }.must_raise Train::CommandTimeoutReached
-      _(error.message).must_include "(10s)"
+      _(conn.run_command("show clock").stdout).must_equal "16:26:00.000 UTC Sun Oct 25 2026"
     end
 
     it "turns paging off so long output is not cut at --More--" do
