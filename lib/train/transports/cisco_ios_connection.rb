@@ -144,6 +144,9 @@ class Train::Transports::SSH
     # asking again after a wrong password, say) raises, and the session is dropped.
     def enable_privileged_exec
       reply = enable_step("enable\n", echo: "enable")
+      # "% No password set": a vty refuses enable when the device has no enable secret. The
+      # prompt after it ends in # on a login at privilege 2 to 14, so it is checked first.
+      raise BadEnablePassword, "enable refused: #{reply.strip.lines.first.to_s.strip}" if reply.match?(/^% /)
       return if reply.match?(/#{Regexp.escape(@base_prompt)}#\z/)
       raise BadEnablePassword, "enable refused: #{reply.strip}" if reply.match?(/#{Regexp.escape(@base_prompt)}>\z/)
       unless reply.match?(PASSWORD_PROMPT)
@@ -250,13 +253,15 @@ class Train::Transports::SSH
     end
 
     # The output of `cmd` in what the channel received: the lines after its echo, without the
-    # device's trailing prompt (`base_prompt` followed by > or #) and line ends. Lines that
-    # only look like a prompt, such as a banner's "#####", stay.
+    # device's trailing prompt (`base_prompt` followed by > or #) and line ends. A command
+    # that prints nothing leaves only the prompt, so the prompt is removed whether or not a
+    # line break precedes it. Lines that only look like a prompt, such as a banner's "#####",
+    # stay.
     def format_output(output, cmd, base_prompt)
       echo = output.index(/#{Regexp.quote(cmd)}\r?\n/)
       body = echo ? output[echo..-1].sub(/\A#{Regexp.quote(cmd)}\r?\n/, "") : output
       body
-        .sub(/(?:\r?\n#{Regexp.escape(base_prompt)}[>#])+\s*\z/, "")
+        .sub(/(?:(?:\A|\r?\n)#{Regexp.escape(base_prompt)}[>#][ \t]*)+\z/, "")
         .sub(/(?:\r\n)+\z/, "")
     end
 

@@ -46,13 +46,15 @@ end
 # device that never confirms a
 # channel close; drop_on: is a line after which the path to the device is gone, before
 # its reply; drop_after: one whose reply arrives and then the path is gone; drop_during:
-# one whose reply is cut off by the path going after its first chunk.
+# one whose reply is cut off by the path going after its first chunk. drop_as: is the error
+# a lost path raises (Net::SSH::Disconnect by default; a reset shows as Errno::ECONNRESET).
 class FakeIOSShell
   attr_reader :lines, :channel, :pending
 
   def initialize(connection, privilege:, secret:, split: false, password_prompt: "Password: ",
                  username_prompt: nil, stall_on: nil, line_delay: nil, confirm_close: true, drop_on: nil,
-                 drop_after: nil, drop_during: nil, late: {}, login_banner: "", login_chunks: nil, log_after: {})
+                 drop_after: nil, drop_during: nil, drop_as: Net::SSH::Disconnect, late: {}, login_banner: "",
+                 login_chunks: nil, log_after: {})
     @connection = connection
     @pending = +""
     @terminal_length = 24
@@ -67,6 +69,7 @@ class FakeIOSShell
     @drop_on = drop_on
     @drop_after = drop_after
     @drop_during = drop_during
+    @drop_as = drop_as
     @late = late
     @log_after = log_after
     @drop_when_read = false
@@ -108,13 +111,13 @@ class FakeIOSShell
   end
 
   def process(wait = nil)
-    raise Net::SSH::Disconnect, "connection closed by remote host" if @dropped
+    dropped!
 
     unless @pending.empty?
       typed = @pending
       @pending = +""
       type(typed)
-      raise Net::SSH::Disconnect, "connection closed by remote host" if @dropped
+      dropped!
     end
     if @close_requested
       @channel_open = false if @confirm_close
@@ -133,7 +136,7 @@ class FakeIOSShell
 
   def close
     request_channel_close
-    raise Net::SSH::Disconnect, "connection closed by remote host" if @dropped
+    dropped!
     raise "Session#close would wait forever: the device never confirms the channel close" if @channel_open && !@confirm_close
 
     @channel_open = false
@@ -154,6 +157,14 @@ class FakeIOSShell
   end
 
   private
+
+  def dropped!
+    return unless @dropped
+
+    raise @drop_as, "connection closed by remote host" if @drop_as == Net::SSH::Disconnect
+
+    raise @drop_as
+  end
 
   def wait_for(seconds)
     sleep seconds if seconds&.positive?
@@ -236,6 +247,8 @@ class FakeIOSShell
       "#{line}\r\nCurrent privilege level is #{@privilege}\r\n#{prompt}"
     when "show clock"
       "#{line}\r\n16:26:00.000 UTC Sun Oct 25 2026\r\n#{prompt}"
+    when "show running-config | include ^snmp-server community"
+      "#{line}\r\n#{prompt}"
     when "exit"
       "#{line}\r\n"
     when /\Aterminal length (\d+)\z/
@@ -433,10 +446,10 @@ describe "CiscoIOSConnection" do
     it "gives a command 10 seconds by default" do
       conn, = connect(privilege: 15, stall_on: "show clock")
       conn.run_command("show privilege")
-      conn.stubs(:monotonic_now).returns(0, 10.5)
+      conn.stubs(:monotonic_now).returns(0, *(1..400).map { |n| n * 5.0 })
 
       error = _ { conn.run_command("show clock") }.must_raise Train::CommandTimeoutReached
-      _(error.message).must_include "10s"
+      _(error.message).must_include "(10s)"
     end
 
     it "turns paging off so long output is not cut at --More--" do
@@ -462,6 +475,43 @@ describe "CiscoIOSConnection" do
 
       _ { conn.run_command("show clock") }.must_raise Net::SSH::Disconnect
       _(fresh.lines).must_be_empty
+    end
+
+    it "returns empty output, not the prompt, for a command that prints nothing" do
+      conn, = connect(privilege: 15)
+
+      _(conn.run_command("show running-config | include ^snmp-server community").stdout).must_equal ""
+    end
+
+    it "returns empty output for a command that prints nothing at user EXEC" do
+      conn, = connect(privilege: 1, enable_password: nil)
+
+      _(conn.run_command("show running-config | include ^snmp-server community").stdout).must_equal ""
+    end
+
+    it "raises when the device has no enable secret and the login is below privilege 15" do
+      conn, = connect(privilege: 5, secret: nil)
+
+      error = _ { conn.run_command("show privilege") }.must_raise Train::Transports::SSH::CiscoIOSConnection::BadEnablePassword
+      _(error.message).must_include "No password set"
+    end
+
+    it "opens a new session when the dropped connection shows as a reset" do
+      conn, shell = connect(privilege: 15, drop_after: "show clock", drop_as: Errno::ECONNRESET)
+      fresh = FakeIOSShell.new(conn, privilege: 15, secret: "s3cret")
+      conn.stubs(:open_channel).returns(shell.channel).then.returns(fresh.channel)
+      conn.run_command("show clock")
+
+      _(conn.run_command("show privilege").stdout).must_equal "Current privilege level is 15"
+      _(shell.shut_down?).must_equal true
+    end
+
+    it "drops the connection when closing it fails" do
+      conn, shell = connect(privilege: 15, drop_after: "show clock")
+      conn.run_command("show clock")
+
+      conn.close
+      _(shell.shut_down?).must_equal true
     end
 
     it "types each command with one Enter" do

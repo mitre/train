@@ -433,8 +433,6 @@ describe "os_detect" do
       ["IOS XE line without a tag, notice only (synthetic)", "Cisco IOS Software, Catalyst L3 Switch Software (CAT9K_IOSXE), Version 17.20.1, RELEASE SOFTWARE (fc1)\nCisco IOS-XE software, Copyright (c) 2005-2026 by cisco Systems, Inc.", "cisco_ios_xe", "17.20.1"],
       # Not a captured banner: an empty release tag with no other IOS XE marker.
       ["empty release tag alone (synthetic)", "Cisco IOS Software [], Catalyst L3 Switch Software (CAT9K_IOSXE), Version 17.8.1, RELEASE SOFTWARE (fc1)", "cisco_ios_xe", "17.8.1"],
-      # IOS XE 3.x routers pair the IOS XE release with an IOSd 15.x IOS line; the IOS XE
-      # release is the one reported. Line format as printed by a CSR1000V on 3.16.
       # Not a captured banner: the two-line layout of IOS XE 3.x routers (CSR 1000V, ASR 1000,
       # ISR 4000), whose IOS XE line carries the 03.x release and whose IOS line the IOSd 15.x one.
       ["CSR 1000V IOS XE 3.x two-line layout (synthetic)", "Cisco IOS XE Software, Version 03.16.04b.S - Extended Support Release\r\nCisco IOS Software, CSR1000V Software (X86_64_LINUX_IOSD-UNIVERSALK9-M), Version 15.5(3)S4b, RELEASE SOFTWARE (fc1)\r\nCopyright (c) 1986-2016 by Cisco Systems, Inc.", "cisco_ios_xe", "03.16.04"],
