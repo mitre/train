@@ -467,14 +467,16 @@ describe "CiscoIOSConnection" do
       _(shell.shut_down?).must_equal false
     end
 
-    it "does not retype a command whose output was cut off by the connection dropping" do
+    it "raises SSHFailed, as the SSH connection does, when the connection drops during a command" do
       conn, shell = connect(privilege: 15, drop_during: "show clock", line_delay: 0.01)
       fresh = FakeIOSShell.new(conn, privilege: 15, secret: "s3cret")
       conn.stubs(:open_channel).returns(shell.channel).then.returns(fresh.channel)
       conn.run_command("show privilege")
 
-      _ { conn.run_command("show clock") }.must_raise Net::SSH::Disconnect
+      error = _ { conn.run_command("show clock") }.must_raise Train::Transports::SSHFailed
+      _(error.message).must_include "SSH command failed"
       _(fresh.lines).must_be_empty
+      _(shell.shut_down?).must_equal true
     end
 
     it "returns empty output, not the prompt, for a command that prints nothing" do
@@ -584,36 +586,37 @@ describe "CiscoIOSConnection" do
       _(shell.shut_down?).must_equal true
     end
 
-    it "raises the dropped connection, not a close error, and shuts the session down" do
+    it "raises SSHFailed, not a close error, when the path is gone as a command is typed" do
       conn, shell = connect(privilege: 15, drop_on: "show clock")
 
-      _ { conn.run_command("show clock") }.must_raise Net::SSH::Disconnect
+      _ { conn.run_command("show clock") }.must_raise Train::Transports::SSHFailed
       _(shell.shut_down?).must_equal true
       conn.close
     end
 
-    it "opens a new session when the device closed the old one while it was idle" do
+    it "opens a new session when the device closed the old one while it was idle, before typing the command" do
       conn, shell = connect(privilege: 15, drop_after: "show clock")
       fresh = FakeIOSShell.new(conn, privilege: 15, secret: "s3cret")
       conn.stubs(:open_channel).returns(shell.channel).then.returns(fresh.channel)
       conn.run_command("show clock")
 
-      _(conn.run_command("show privilege").stdout).must_equal "Current privilege level is 15"
+      _(conn.run_command("show version").stdout).must_equal ""
       _(shell.shut_down?).must_equal true
-      _(fresh.lines).must_include "show privilege"
+      _(fresh.lines).must_include "show version"
+      _(shell.lines).wont_include "show version"
     end
 
     it "shuts the session down when the connection is gone during session setup" do
       conn, shell = connect(privilege: 1, drop_after: "")
 
-      _ { conn.run_command("show clock") }.must_raise Net::SSH::Disconnect
+      _ { conn.run_command("show clock") }.must_raise Train::Transports::SSHFailed
       _(shell.shut_down?).must_equal true
     end
 
-    it "keeps the original error when the connection drops during enable" do
+    it "reports the dropped connection when it drops during enable" do
       conn, shell = connect(privilege: 1, drop_on: "enable")
 
-      _ { conn.run_command("show privilege") }.must_raise Net::SSH::Disconnect
+      _ { conn.run_command("show privilege") }.must_raise Train::Transports::SSHFailed
       _(shell.shut_down?).must_equal true
     end
 

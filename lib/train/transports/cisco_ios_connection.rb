@@ -175,18 +175,32 @@ class Train::Transports::SSH
 
     def run_command_via_connection(cmd, opts = {}, &_data_handler)
       logger.debug("[SSH] Running `#{cmd}` on #{self}")
-      reopened = false
-      begin
-        session
-        format_result(send_command(cmd, opts[:timeout] || READ_TIMEOUT, Train::CommandTimeoutReached))
-      rescue Net::SSH::Disconnect, IOError, SystemCallError
-        # The device closes an idle session after its exec-timeout; when that is found out
-        # before any output arrived, open a new session and type the command again.
-        raise if reopened || !@buf.empty?
+      session
+      reset_closed_session
+      format_result(send_command(cmd, opts[:timeout] || READ_TIMEOUT, Train::CommandTimeoutReached))
+    rescue Net::SSH::Exception, IOError, SystemCallError => e
+      raise Train::Transports::SSHFailed, "SSH command failed (#{e.message})"
+    end
 
-        reopened = true
-        retry
-      end
+    # As SSH::Connection resets a closed session before each command. The device closes a
+    # session left idle past its exec-timeout, and that close waits unread until the session
+    # is processed; processing it once with no wait brings it out, and the session is dropped
+    # and opened again before the command is typed, so a command is never typed into a dead
+    # session or typed twice.
+    def reset_closed_session
+      ssh = @session.connection
+      ssh.process(0) unless ssh.closed?
+      return unless ssh.closed?
+
+      reopen
+    rescue Net::SSH::Exception, IOError, SystemCallError
+      reopen
+    end
+
+    def reopen
+      logger.debug("[SSH] the device closed the session to #{self}; opening a new one")
+      close
+      session
     end
 
     # As Netmiko's send_command: type the command with one Enter, read its echo, then read to
