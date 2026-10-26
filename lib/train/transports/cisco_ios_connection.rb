@@ -39,12 +39,24 @@ class Train::Transports::SSH
       raise NotImplementedError, "#{self.class} does not implement #download()"
     end
 
+    # Closes the SSH session. Net::SSH's Session#close waits, with no limit, for the device to
+    # confirm the channel close; this waits at most the connection timeout, then drops the
+    # connection, as it does when the path to the device is already gone.
     def close
       return if @session.nil?
 
-      ssh = @session.connection
+      channel = @session
       @session = nil
-      ssh.close unless ssh.closed?
+      ssh = channel.connection
+      return if ssh.closed?
+
+      channel.close
+      deadline = monotonic_now + timeout_seconds
+      ssh.process(0.1) until ssh.channels.empty? || monotonic_now > deadline
+      ssh.channels.empty? ? ssh.close : ssh.shutdown!
+    rescue Net::SSH::Exception, IOError, SystemCallError => e
+      logger.debug("[SSH] dropping the connection to #{self}: #{e.message}")
+      ssh&.shutdown!
     end
 
     private
@@ -58,40 +70,36 @@ class Train::Transports::SSH
     def session
       return @session unless @session.nil?
 
+      # Opened by the first send_and_read, so a failure here (a refused enable, say) closes
+      # the session there.
       @session = open_channel(establish_connection)
-      begin
-        # Escalate privilege to enable mode if password is given
-        if @enable_password
-          # This verifies we are not in privileged exec mode before running the
-          # enable command. Otherwise, the password will be in history.
-          if run_command_via_connection("show privilege").stdout.split[-1] != "15"
-            enable_privileged_exec
-          end
-        end
 
-        # Prevent `--MORE--` by removing terminal length limit
-        run_command_via_connection("terminal length 0")
-      rescue StandardError
-        # A session left mid-way (at a password prompt, say) would take the next command
-        # as its answer; drop it so the next command opens a new one.
-        close
-        raise
+      # Escalate privilege to enable mode if password is given
+      if @enable_password
+        # This verifies we are not in privileged exec mode before running the
+        # enable command. Otherwise, the password will be in history.
+        if run_command_via_connection("show privilege").stdout.split[-1] != "15"
+          enable_privileged_exec
+        end
       end
+
+      # Prevent `--MORE--` by removing terminal length limit
+      run_command_via_connection("terminal length 0")
 
       @session
     end
 
-    # IOS ends the enable password prompt with a colon, whether its own "Password: " or one
-    # set with `aaa authentication password-prompt`.
-    PASSWORD_PROMPT = /:\s?\z/.freeze
-    # AAA enable authentication can ask for a username first, which this connection does not
-    # answer.
-    USERNAME_PROMPT = /Username: ?\z/.freeze
+    # IOS ends a question with a colon. The enable password is typed only at a question that
+    # asks for a password or secret: IOS's own "Password: " or one set with
+    # `aaa authentication password-prompt`. AAA can ask for a username first, under any text
+    # (`aaa authentication username-prompt`), and a password typed there would echo.
+    QUESTION_PROMPT = /:\s?\z/.freeze
+    PASSWORD_PROMPT = /(?:password|secret|passcode)[^\r\n]*:\s?\z/i.freeze
     PRIVILEGED_PROMPT = /\S+#\z/.freeze
     USER_EXEC_PROMPT = /\S+>\z/.freeze
-    # IOS asks for the enable password three times before it gives up, so after a wrong
-    # password two empty answers return to user EXEC; this is the most sent.
-    ENABLE_ATTEMPTS = 3
+    # IOS asks for the enable password three times, so after a wrong one two empty answers
+    # return the session to user EXEC.
+    ENABLE_ATTEMPTS = 2
 
     # Types `enable` and the password one line at a time, reading each reply before sending
     # the next line, so no reply is left on the channel for the next command. Only what
@@ -99,10 +107,12 @@ class Train::Transports::SSH
     # previous command can arrive first. A wrong password is asked for again; empty answers
     # use up the remaining tries and return the session to user EXEC.
     def enable_privileged_exec
-      reply = exchange("enable\n", PRIVILEGED_PROMPT, PASSWORD_PROMPT, USER_EXEC_PROMPT, echo: "enable")
+      reply = exchange("enable\n", PRIVILEGED_PROMPT, QUESTION_PROMPT, USER_EXEC_PROMPT, echo: "enable")
       return if reply.match?(PRIVILEGED_PROMPT)
       raise BadEnablePassword, "enable refused: #{reply.strip}" if reply.match?(USER_EXEC_PROMPT)
-      raise BadEnablePassword, "enable asks for a Username, which this connection does not send" if reply.match?(USERNAME_PROMPT)
+      unless reply.match?(PASSWORD_PROMPT)
+        raise BadEnablePassword, "enable asks #{reply.strip.lines.last.inspect}, which is not a password prompt"
+      end
 
       reply = exchange("#{@enable_password}\n", PRIVILEGED_PROMPT, PASSWORD_PROMPT, USER_EXEC_PROMPT)
       return if reply.match?(PRIVILEGED_PROMPT)
@@ -118,25 +128,28 @@ class Train::Transports::SSH
     # Sends one line of the enable exchange and reads the channel until the reply (what
     # follows the echo, when one is given) ends with one of the patterns.
     def exchange(line, *patterns, echo: nil)
-      @buf = ""
-      session.send_data(line)
       reply = nil
-      read_until("enable") do
+      send_and_read(line, "enable") do
         reply = echo ? @buf[/#{Regexp.quote(echo)}\r?\n(.*)\z/m, 1] : @buf
         reply && patterns.any? { |pattern| reply.match?(pattern) }
       end
       reply
     end
 
-    # Processes the channel until the block is true. Gives up when the device sends nothing
-    # for the connection timeout; output that keeps arriving, as from a long show command,
-    # keeps the wait going. `what` names the step in the error and must not hold a secret.
-    def read_until(what)
-      seconds = @ssh_options.fetch(:timeout, 15)
+    # Sends a line, then processes the channel until the block is true. Gives up when the
+    # device sends nothing for the connection timeout; output that keeps arriving, as from a
+    # long show command, keeps the wait going. `what` names the step in the error and must
+    # not hold a secret. On any error, including one while the session is being set up, the
+    # session is closed: an answer still on its way, or a session left at a password prompt,
+    # would otherwise take the next command.
+    def send_and_read(line, what)
+      @buf = ""
+      session.send_data(line)
+      seconds = timeout_seconds
       received = @buf.size
-      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + seconds
+      deadline = monotonic_now + seconds
       until yield
-        now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        now = monotonic_now
         if @buf.size != received
           received = @buf.size
           deadline = now + seconds
@@ -146,17 +159,22 @@ class Train::Transports::SSH
 
         session.connection.process(0.1)
       end
+    rescue StandardError
+      close
+      raise
+    end
+
+    def timeout_seconds
+      @ssh_options.fetch(:timeout, 15)
+    end
+
+    def monotonic_now
+      Process.clock_gettime(Process::CLOCK_MONOTONIC)
     end
 
     def run_command_via_connection(cmd, &_data_handler)
-      # Ensure buffer is empty before sending data
-      @buf = ""
-
       logger.debug("[SSH] Running `#{cmd}` on #{self}")
-      session.send_data(cmd + "\r\n")
-
-      logger.debug("[SSH] waiting for prompt")
-      read_until("`#{cmd}`") do
+      send_and_read(cmd + "\r\n", "`#{cmd}`") do
         if @buf =~ /Bad (secrets|password)|Access denied/
           raise BadEnablePassword
         end
