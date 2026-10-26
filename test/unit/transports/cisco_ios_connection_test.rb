@@ -33,7 +33,12 @@ end
 # with (`aaa authentication password-prompt` changes it); username_prompt: is the text of
 # an AAA enable that asks for a username first. stall_on: is a line the device never
 # answers. line_delay: sends replies a line at a time, that many seconds apart, as a long
-# command streams its output. confirm_close: false is a device that never confirms a
+# command streams its output. late: maps a line to the seconds its reply is held back.
+# login_banner: is text the device prints before its first prompt, with no line end.
+# log_after: maps a line to the seconds after its reply at which a syslog message arrives
+# and IOS reprints the prompt (`terminal monitor` with `logging synchronous`).
+# `exit` ends the exec session: the device closes the channel. confirm_close: false is a
+# device that never confirms a
 # channel close; drop_on: is a line after which the path to the device is gone, before
 # its reply; drop_after: one whose reply arrives and then the path is gone.
 class FakeIOSShell
@@ -41,7 +46,7 @@ class FakeIOSShell
 
   def initialize(connection, privilege:, secret:, split: false, password_prompt: "Password: ",
                  username_prompt: nil, stall_on: nil, line_delay: nil, confirm_close: true, drop_on: nil,
-                 drop_after: nil)
+                 drop_after: nil, late: {}, login_banner: "", log_after: {})
     @connection = connection
     @privilege = privilege
     @secret = secret
@@ -53,6 +58,8 @@ class FakeIOSShell
     @confirm_close = confirm_close
     @drop_on = drop_on
     @drop_after = drop_after
+    @late = late
+    @log_after = log_after
     @drop_when_read = false
     @channel = FakeIOSChannel.new(self)
     @channel_open = true
@@ -60,12 +67,13 @@ class FakeIOSShell
     @closed = false
     @shut_down = false
     @dropped = false
-    @stalled = false
     @next_chunk_at = nil
     @password_attempts = nil
     @line = +""
     @lines = []
-    @chunks = ["\r\n\r\n\r\n#{prompt}"]
+    login = "\r\n\r\n\r\n#{login_banner}#{prompt}"
+    at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    @chunks = (line_delay ? login.scan(/.*?\r\n|.+\z/) : [login]).map { |piece| [piece, at += line_delay.to_f] }
   end
 
   def type(data)
@@ -95,24 +103,20 @@ class FakeIOSShell
       @channel_open = false if @confirm_close
       return wait_for(wait)
     end
-    return wait_for(wait) if @chunks.empty? && @stalled
-    raise "the device has nothing more to send" if @chunks.empty?
+    return wait_for(wait) if @chunks.empty?
 
     now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-    if @line_delay
-      @next_chunk_at ||= now + @line_delay
-      return wait_for([wait.to_f, @next_chunk_at - now].min) if now < @next_chunk_at
+    ready_at = @chunks.first[1]
+    return wait_for([wait.to_f, ready_at - now].min) if now < ready_at
 
-      @next_chunk_at = now + @line_delay
-    end
-    @connection.instance_variable_set(:@buf, @connection.instance_variable_get(:@buf) + @chunks.shift)
+    @connection.instance_variable_set(:@buf, @connection.instance_variable_get(:@buf) + @chunks.shift[0])
     @dropped = true if @drop_when_read && @chunks.empty?
   end
 
   def close
     request_channel_close
     raise Net::SSH::Disconnect, "connection closed by remote host" if @dropped
-    raise "Session#close would wait forever: the device never confirms the channel close" unless @confirm_close
+    raise "Session#close would wait forever: the device never confirms the channel close" if @channel_open && !@confirm_close
 
     @channel_open = false
     @closed = true
@@ -131,14 +135,6 @@ class FakeIOSShell
     @shut_down
   end
 
-  def unread_replies
-    @chunks.size
-  end
-
-  def asking_for_password?
-    !@password_attempts.nil?
-  end
-
   private
 
   def wait_for(seconds)
@@ -154,20 +150,30 @@ class FakeIOSShell
     line = @line
     @line = +""
     @lines << line
-    return @stalled = true if line == @stall_on
+    return if line == @stall_on
     return @dropped = true if line == @drop_on
 
     @drop_when_read = true if line == @drop_after
 
     reply = @password_attempts ? password(line) : command(line)
     cut = reply.rindex("\r\n")
-    if @line_delay
-      @chunks.concat(reply.scan(/.*?\r\n|.+\z/))
-    elsif @split && cut
-      @chunks << reply[0, cut + 2] << reply[(cut + 2)..-1]
-    else
-      @chunks << reply
+    pieces = if @line_delay
+               reply.scan(/.*?\r\n|.+\z/)
+             elsif @split && cut
+               [reply[0, cut + 2], reply[(cut + 2)..-1]]
+             else
+               [reply]
+             end
+    # Replies come out in order: one held back delays the ones typed after it.
+    at = [Process.clock_gettime(Process::CLOCK_MONOTONIC), @chunks.last&.last.to_f].max + @late.fetch(line, 0)
+    pieces.each do |piece|
+      at += @line_delay if @line_delay
+      @chunks << [piece, at]
     end
+    if @log_after.key?(line)
+      @chunks << ["\r\n*Oct 25 16:26:01.001: %SYS-5-CONFIG_I: Configured from console by console\r\n#{prompt}", at + @log_after[line]]
+    end
+    @channel_open = false if line == "exit" && @confirm_close
   end
 
   # Passwords are not echoed. Three wrong tries return to user EXEC.
@@ -200,8 +206,11 @@ class FakeIOSShell
       "#{line}\r\nCurrent privilege level is #{@privilege}\r\n#{prompt}"
     when "show clock"
       "#{line}\r\n16:26:00.000 UTC Sun Oct 25 2026\r\n#{prompt}"
+    when "exit"
+      "#{line}\r\n"
     when "show running-config"
-      config = ["Building configuration...", "", "hostname R1", "!"] + (1..8).map { |n| "interface Ethernet0/#{n}" } + ["end"]
+      config = ["Building configuration...", "", "hostname R1", "!", "banner motd ^C", "##########",
+                "Authorized access only", "Access denied to unauthorized users", "##########", "^C"] + (1..8).map { |n| "interface Ethernet0/#{n}" } + ["end"]
       "#{line}\r\n#{config.join("\r\n")}\r\n#{prompt}"
     else
       "#{line}\r\n#{prompt}"
@@ -245,7 +254,7 @@ describe "CiscoIOSConnection" do
   end
 
   describe "enable mode" do
-    def connect(privilege:, enable_password: "s3cret", secret: "s3cret", timeout: 15, **shell_options)
+    def connect(privilege:, enable_password: "s3cret", secret: "s3cret", timeout: 2, **shell_options)
       conn = cls.new(opts.merge(enable_password: enable_password, connection_timeout: timeout)).connection
       shell = FakeIOSShell.new(conn, privilege: privilege, secret: secret, **shell_options)
       conn.stubs(:establish_connection)
@@ -304,31 +313,92 @@ describe "CiscoIOSConnection" do
       _(shell.closed?).must_equal true
     end
 
-    it "gives up on a command the device does not answer within the connection timeout" do
-      conn, = connect(privilege: 15, stall_on: "show clock", timeout: 0.2)
+    it "finds the prompt when a login banner ends without a line end" do
+      conn, = connect(privilege: 15, login_banner: "Authorized access only")
+
+      _(conn.run_command("show clock").stdout).must_equal "16:26:00.000 UTC Sun Oct 25 2026"
+    end
+
+    it "finds the prompt past a login banner with border lines that arrives line by line" do
+      border = "##########\r\n"
+      notice = "You are accessing a U.S. Government (USG) Information System (IS)\r\n"
+      banner = border + notice + border + notice * 3 + border + notice * 3 + border
+      conn, = connect(privilege: 15, login_banner: banner, line_delay: 0.03)
+
+      _(conn.run_command("show clock").stdout).must_equal "16:26:00.000 UTC Sun Oct 25 2026"
+    end
+
+    it "gives a command its own output when IOS reprints the prompt after a log message" do
+      conn, = connect(privilege: 15, log_after: { "show clock" => 0.05 })
+      conn.run_command("show clock")
+
+      _(conn.run_command("show privilege").stdout).must_equal "Current privilege level is 15"
+    end
+
+    it "enters enable mode when IOS reprints the prompt after a log message" do
+      conn, = connect(privilege: 1, log_after: { "" => 0.3 })
+
+      _(conn.run_command("show privilege").stdout).must_equal "Current privilege level is 15"
+    end
+
+    it "types each command with one Enter" do
+      conn, shell = connect(privilege: 15)
+      conn.run_command("show clock")
+      typed = shell.lines.dup
+
+      conn.run_command("show privilege")
+      _(shell.lines.drop(typed.size)).must_equal ["show privilege"]
+    end
+
+    it "sets the terminal width so long lines are not wrapped" do
+      conn, shell = connect(privilege: 15)
+      conn.run_command("show clock")
+
+      _(shell.lines).must_include "terminal width 511"
+    end
+
+    it "reads a command's output to the device's own prompt, past lines that look like a prompt" do
+      conn, = connect(privilege: 15, line_delay: 0.001)
+
+      config = conn.run_command("show running-config").stdout
+      _(config).must_include "Authorized access only"
+      _(config.lines.count { |line| line.chomp == "##########" }).must_equal 2
+      _(config.lines.last).must_equal "end"
+    end
+
+    it "raises a command timeout when a command runs past the timeout it is given" do
+      conn, = connect(privilege: 15, stall_on: "show clock")
       started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 
-      error = _ { conn.run_command("show clock") }.must_raise Train::Transports::SSHFailed
+      error = _ { conn.run_command("show clock", timeout: 0.2) }.must_raise Train::CommandTimeoutReached
       _(error.message).must_include "show clock"
       _(Process.clock_gettime(Process::CLOCK_MONOTONIC) - started).must_be :<, 5
     end
 
-    it "waits for a command whose output streams, with pauses, for longer than the connection timeout" do
-      conn, = connect(privilege: 15, line_delay: 0.15, timeout: 0.4)
+    it "times out on total time even while output keeps arriving" do
+      conn, = connect(privilege: 15, line_delay: 0.05)
 
-      config = conn.run_command("show running-config").stdout
-      _(config).must_include "hostname R1"
-      _(config.lines.last).must_equal "end"
+      _ { conn.run_command("show running-config", timeout: 0.3) }.must_raise Train::CommandTimeoutReached
     end
 
-    it "closes the session when a command times out, so its late output never answers a later command" do
-      conn, shell = connect(privilege: 15, stall_on: "show running-config", timeout: 0.2)
+    it "gives a later command its own output when an earlier one timed out" do
+      conn, shell = connect(privilege: 15, late: { "show running-config" => 0.5 })
       fresh = FakeIOSShell.new(conn, privilege: 15, secret: "s3cret")
       conn.stubs(:open_channel).returns(shell.channel).then.returns(fresh.channel)
 
-      _ { conn.run_command("show running-config") }.must_raise Train::Transports::SSHFailed
+      _ { conn.run_command("show running-config", timeout: 0.2) }.must_raise Train::CommandTimeoutReached
       _(shell.closed? || shell.shut_down?).must_equal true
+      _(conn.run_command("show running-config").stdout).must_include "hostname R1"
       _(conn.run_command("show clock").stdout).must_equal "16:26:00.000 UTC Sun Oct 25 2026"
+    end
+
+    it "logs out with exit before closing the SSH session" do
+      conn, shell = connect(privilege: 15)
+      conn.run_command("show clock")
+
+      conn.close
+      _(shell.lines.last).must_equal "exit"
+      _(shell.closed?).must_equal true
     end
 
     it "closes within the connection timeout when the device never confirms the channel close" do
@@ -357,8 +427,8 @@ describe "CiscoIOSConnection" do
       _(shell.shut_down?).must_equal true
     end
 
-    it "shuts the session down when the connection is gone before enable is sent" do
-      conn, shell = connect(privilege: 1, drop_after: "show privilege")
+    it "shuts the session down when the connection is gone during session setup" do
+      conn, shell = connect(privilege: 1, drop_after: "")
 
       _ { conn.run_command("show clock") }.must_raise Net::SSH::Disconnect
       _(shell.shut_down?).must_equal true
@@ -409,12 +479,12 @@ describe "CiscoIOSConnection" do
       _(shell.lines).wont_include "s3cret"
     end
 
-    it "raises on a wrong enable password and leaves the session at user EXEC with nothing unread" do
+    it "raises on a wrong enable password and drops the session" do
       conn, shell = connect(privilege: 1, enable_password: "wrong")
 
-      _ { conn.run_command("show privilege") }.must_raise Train::Transports::SSH::CiscoIOSConnection::BadEnablePassword
-      _(shell.asking_for_password?).must_equal false
-      _(shell.unread_replies).must_equal 0
+      error = _ { conn.run_command("show privilege") }.must_raise Train::Transports::SSH::CiscoIOSConnection::BadEnablePassword
+      _(error.message).must_include "rejected"
+      _(shell.closed?).must_equal true
     end
   end
 
@@ -464,14 +534,14 @@ describe "CiscoIOSConnection" do
     it "returns the correct output" do
       cmd = "show calendar"
       output = "show calendar\r\n10:35:50 UTC Fri Mar 23 2018\r\n7200_ios_12#\r\n7200_ios_12#"
-      result = connection.send(:format_output, output, cmd)
+      result = connection.send(:format_output, output, cmd, "7200_ios_12")
       _(result).must_equal "10:35:50 UTC Fri Mar 23 2018"
     end
 
     it "returns the correct output when a pipe is used" do
       cmd = "show running-config | section line con 0"
       output = "show running-config | section line con 0\r\nline con 0\r\n exec-timeout 0 0\r\n privilege level 15\r\n logging synchronous\r\n stopbits 1\r\n7200_ios_12#\r\n7200_ios_12#"
-      result = connection.send(:format_output, output, cmd)
+      result = connection.send(:format_output, output, cmd, "7200_ios_12")
       _(result).must_equal "line con 0\r\n exec-timeout 0 0\r\n privilege level 15\r\n logging synchronous\r\n stopbits 1"
     end
   end
