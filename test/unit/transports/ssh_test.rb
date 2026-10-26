@@ -51,6 +51,12 @@ describe "ssh transport" do
     it "does not forward the ssh agent" do
       _(ssh.options[:forward_agent]).must_equal false
     end
+
+    # InSpec passes a transport only the options the transport declares
+    # (Train.options returns these declarations).
+    it "declares the Cisco enable password, unset by default" do
+      _(cls.default_options[:enable_password]).must_equal({ default: nil })
+    end
   end
 
   describe "overides default options" do

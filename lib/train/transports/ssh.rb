@@ -52,6 +52,8 @@ module Train::Transports
     option :user, default: "root", coerce: proc { |v| read_options_from_ssh_config(v, :user) }, required: true
     option :key_files, default: nil
     option :password,  default: nil
+    # Password for enable mode on Cisco IOS and IOS XE devices
+    option :enable_password, default: nil
     # additional ssh options
     option :keepalive, default: true
     option :keepalive_interval, default: 60
