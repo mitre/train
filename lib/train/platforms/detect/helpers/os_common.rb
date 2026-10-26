@@ -91,7 +91,7 @@ module Train::Platforms::Detect::Helpers
     # "IOS (tm)" alone is too common a phrase to match mid-line; 12.x prints it at the start
     # of a line, after "Cisco Internetwork Operating System Software". The version stops at a
     # space, comma or line end (CRLF over SSH).
-    CISCO_IOS_LINE = /(?:Cisco IOS Software(?: \[(?<tag>[^\]]*)\])?,|^IOS \(tm\)) (?<description>.*?) ?\((?<image>[^)]+)\),? +(?:Experimental )?Version (?<version>[^\s,]+)/.freeze
+    CISCO_IOS_LINE = /(?:Cisco IOS Software(?: \[(?<tag>[^\]]*)\])?,|^IOS \(tm\)) (?<description>.*?) ?\((?<image>[^)]+)\), +(?:Experimental )?Version (?<version>[^\s,]+)/.freeze
     CISCO_IOS_XE_LINE = /Cisco IOS XE (?:SD-WAN )?Software, Version (?<version>[^\s,]+)/.freeze
     CISCO_IOS_XE_NOTICE = /Cisco IOS-XE software, Copyright/.freeze
 
@@ -122,7 +122,8 @@ module Train::Platforms::Detect::Helpers
     # Without a numeric release there is no platform.
     def cisco_ios_version(res)
       ios = res.match(CISCO_IOS_LINE)
-      xe = cisco_ios_xe_line(res, ios)
+      xe_lines = cisco_ios_xe_lines(res, ios)
+      xe = ios ? xe_lines.find { |line| res[line.end(0)...ios.begin(0)].count("\n") == 1 } : xe_lines.first
       return if ios.nil? && xe.nil?
 
       model = ios && ios[:image]
@@ -131,18 +132,22 @@ module Train::Platforms::Detect::Helpers
         return version && { version: version, model: model, type: "ios" }
       end
 
-      version = xe && xe[:version][/\A\d+\.\d+\.\d+[A-Z]*/]
+      release_line = xe || xe_lines.last
+      version = release_line && release_line[:version][/\A\d+\.\d+\.\d+[A-Z]*/]
       version ||= ios && ios[:version][/\A\d+\.\d+(?:\.\d+[A-Z]*)?/]
       version && { version: version, model: model, type: "ios-xe" }
     end
 
-    # The "Cisco IOS XE Software, Version" line. IOS XE prints it directly above the IOS line;
-    # the same words elsewhere, such as in a login banner, are not it.
-    def cisco_ios_xe_line(res, ios)
+    # The "Cisco IOS XE Software, Version" lines that can belong to this show version: above
+    # the IOS line with only blank lines between, or any when there is no IOS line. Only the
+    # one directly above the IOS line, where IOS XE prints it, marks the device as IOS XE; the
+    # same words elsewhere, such as in a login banner, do not. Once another marker shows
+    # IOS XE, the nearest one gives the release.
+    def cisco_ios_xe_lines(res, ios)
       lines = res.to_enum(:scan, CISCO_IOS_XE_LINE).map { Regexp.last_match }
-      return lines.first if ios.nil?
+      return lines if ios.nil?
 
-      lines.find { |xe| res[xe.end(0)...ios.begin(0)].to_s.count("\n") == 1 }
+      lines.select { |line| res[line.end(0)...ios.begin(0)].to_s.match?(/\A[^\n]*\n(?:[ \t]*\r?\n)*\z/) }
     end
 
     # IOS XE markers: a "Cisco IOS XE Software" line (16.x and later); a release tag on the
@@ -154,7 +159,7 @@ module Train::Platforms::Detect::Helpers
 
       res.match?(CISCO_IOS_XE_NOTICE)
     end
-    private :cisco_nexus_version, :cisco_ios_version, :cisco_ios_xe_line, :cisco_ios_xe?
+    private :cisco_nexus_version, :cisco_ios_version, :cisco_ios_xe_lines, :cisco_ios_xe?
 
     def unix_uuid
       (unix_uuid_from_chef         ||

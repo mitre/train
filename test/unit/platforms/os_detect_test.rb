@@ -405,6 +405,12 @@ describe "os_detect" do
       # above the IOS line, where IOS XE prints it.
       ["classic IOS with IOS XE named in its banner (synthetic)", "Moving to Cisco IOS XE Software, Version 17.9.4 on Monday\r\n\r\nCisco IOS Software, C3750E Software (C3750E-UNIVERSALK9-M), Version 12.2(58)SE, RELEASE SOFTWARE (fc1)", "cisco_ios", "12.2"],
       ["IOS XE with IOS XE named in its banner (synthetic)", "Moving to Cisco IOS XE Software, Version 17.9.4 on Monday\r\n\r\nCisco IOS XE Software, Version 17.13.01\r\nCisco IOS Software [Dublin], Catalyst L3 Switch Software (CAT9K_IOSXE), Version 17.13.1, RELEASE SOFTWARE (fc1)", "cisco_ios_xe", "17.13.01"],
+      ["IOL with an IOS XE version named in its banner (synthetic)", "Moving to Cisco IOS XE Software, Version 17.9.4 on Monday\r\nWelcome\r\n\r\nCisco IOS Software [IOSXE], Linux Software (X86_64BI_LINUX-ADVENTERPRISEK9-M), Version 17.15.1, RELEASE SOFTWARE (fc4)", "cisco_ios_xe", "17.15.1"],
+      ["IOS XE line above a blank line and the IOS line (synthetic)", "Cisco IOS XE Software, Version 17.13.01\r\n\r\nCisco IOS Software [Dublin], Catalyst L3 Switch Software (CAT9K_IOSXE), Version 17.13.1, RELEASE SOFTWARE (fc1)", "cisco_ios_xe", "17.13.01"],
+      ["classic IOS followed by text naming IOS XE (synthetic)", "Cisco IOS Software, C3750E Software (C3750E-UNIVERSALK9-M), Version 12.2(58)SE, RELEASE SOFTWARE (fc1)\r\nCisco IOS XE Software, Version 17.9.4", "cisco_ios", "12.2"],
+      # As 3.16.5 did, uppercase train letters joined to the third number of the IOS XE line
+      # are kept.
+      ["IOS XE line with train letters (synthetic)", "Cisco IOS XE Software, Version 16.09.04SE\r\nCisco IOS Software [Fuji], Catalyst L3 Switch Software (CAT9K_IOSXE), Version 16.9.4SE, RELEASE SOFTWARE (fc1)", "cisco_ios_xe", "16.09.04SE"],
       ["IOL router (17.15)", "Cisco IOS Software [IOSXE], Linux Software (X86_64BI_LINUX-ADVENTERPRISEK9-M), Version 17.15.1, RELEASE SOFTWARE (fc4)", "cisco_ios_xe", "17.15.1"],
       ["IOL switch (17.15)", "Cisco IOS Software [IOSXE], Linux Software (X86_64BI_LINUX_L2-ADVENTERPRISEK9-M), Version 17.15.1, RELEASE SOFTWARE (fc4)", "cisco_ios_xe", "17.15.1"],
       ["Catalyst 9300 17.13 (release notes)", "Cisco IOS XE Software, Version 17.13.01\nCisco IOS Software [Dublin], Catalyst L3 Switch Software (CAT9K_IOSXE), Version 17.13.1, RELEASE SOFTWARE (fc1)", "cisco_ios_xe", "17.13.01"],
@@ -462,6 +468,7 @@ describe "os_detect" do
       ]
       without_release.each do |show_version|
         mock = Train::Transports::Mock::Connection.new
+        mock.mock_command("uname -s", ios_uname, "", 0)
         mock.mock_command("show version", show_version)
 
         _ { Train::Platforms::Detect.scan(mock) }.must_raise(Train::PlatformDetectionFailed)
@@ -475,10 +482,19 @@ describe "os_detect" do
       ]
       not_cisco.each do |show_version|
         mock = Train::Transports::Mock::Connection.new
+        mock.mock_command("uname -s", ios_uname, "", 0)
         mock.mock_command("show version", show_version)
 
         _ { Train::Platforms::Detect.scan(mock) }.must_raise(Train::PlatformDetectionFailed)
       end
+    end
+
+    it "takes NX-OS over an IOS line in the same output" do
+      mock = Train::Transports::Mock::Connection.new
+      mock.mock_command("show version", "Cisco Nexus Operating System (NX-OS) Software\n  system:      version 5.2(1)N1(8b)\nCisco IOS Software, C3750E Software (C3750E-UNIVERSALK9-M), Version 12.2(58)SE, RELEASE SOFTWARE (fc1)\n")
+      platform = Train::Platforms::Detect.scan(mock)
+
+      _(platform[:name]).must_equal("cisco_nexus")
     end
 
     it "recognizes Cisco Nexus" do
