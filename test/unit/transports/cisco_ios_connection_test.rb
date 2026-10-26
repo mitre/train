@@ -47,7 +47,9 @@ end
 # channel close; drop_on: is a line after which the path to the device is gone, before
 # its reply; drop_after: one whose reply arrives and then the path is gone; drop_during:
 # one whose reply is cut off by the path going after its first chunk. drop_as: is the error
-# a lost path raises (Net::SSH::Disconnect by default; a reset shows as Errno::ECONNRESET).
+# a lost path raises (a reset shows as Errno::ECONNRESET). With the default, a clean close by
+# the device, the first process after it returns with the session marked closed and only a
+# later one raises Net::SSH::Disconnect, as Net::SSH behaves.
 class FakeIOSShell
   attr_reader :lines, :channel, :pending
 
@@ -111,6 +113,10 @@ class FakeIOSShell
   end
 
   def process(wait = nil)
+    if @dropped && @drop_as == Net::SSH::Disconnect && !@closed
+      @closed = true
+      return nil
+    end
     dropped!
 
     unless @pending.empty?
@@ -446,8 +452,8 @@ describe "CiscoIOSConnection" do
     it "waits for a slow command as long as it takes when no timeout is given, as the SSH connection does" do
       conn, = connect(privilege: 15, late: { "show clock" => 0.3 })
       conn.run_command("show privilege")
-      # Each look at the clock is 5 s later than the last: a default limit of any size would fire.
-      conn.stubs(:monotonic_now).returns(0, *(1..400).map { |n| n * 5.0 })
+      # Each look at the clock is a day later than the last, so any default limit would fire.
+      conn.stubs(:monotonic_now).returns(0, *(1..400).map { |n| n * 86_400.0 })
 
       _(conn.run_command("show clock").stdout).must_equal "16:26:00.000 UTC Sun Oct 25 2026"
     end
@@ -476,7 +482,7 @@ describe "CiscoIOSConnection" do
       error = _ { conn.run_command("show clock") }.must_raise Train::Transports::SSHFailed
       _(error.message).must_include "SSH command failed"
       _(fresh.lines).must_be_empty
-      _(shell.shut_down?).must_equal true
+      _(shell.closed?).must_equal true
     end
 
     it "returns empty output, not the prompt, for a command that prints nothing" do
@@ -506,6 +512,31 @@ describe "CiscoIOSConnection" do
 
       _(conn.run_command("show privilege").stdout).must_equal "Current privilege level is 15"
       _(shell.shut_down?).must_equal true
+    end
+
+    it "opens a new session when the closed session shows as an IOError" do
+      conn, shell = connect(privilege: 15, drop_after: "show clock", drop_as: IOError)
+      fresh = FakeIOSShell.new(conn, privilege: 15, secret: "s3cret")
+      conn.stubs(:open_channel).returns(shell.channel).then.returns(fresh.channel)
+      conn.run_command("show clock")
+
+      _(conn.run_command("show privilege").stdout).must_equal "Current privilege level is 15"
+    end
+
+    it "raises SSHFailed when the connection resets during a command" do
+      conn, shell = connect(privilege: 15, drop_on: "show clock", drop_as: Errno::ECONNRESET)
+
+      _ { conn.run_command("show clock") }.must_raise Train::Transports::SSHFailed
+      _(shell.shut_down?).must_equal true
+    end
+
+    it "tries to reopen a closed session once, not twice, when the new session fails" do
+      conn, shell = connect(privilege: 15, drop_after: "show clock")
+      conn.unstub(:open_channel)
+      conn.expects(:open_channel).twice.returns(shell.channel).then.raises(Net::SSH::ConnectionTimeout, "timed out")
+      conn.run_command("show clock")
+
+      _ { conn.run_command("show privilege") }.must_raise Train::Transports::SSHFailed
     end
 
     it "drops the connection when closing it fails" do
@@ -601,16 +632,16 @@ describe "CiscoIOSConnection" do
       conn.run_command("show clock")
 
       _(conn.run_command("show version").stdout).must_equal ""
-      _(shell.shut_down?).must_equal true
+      _(shell.closed?).must_equal true
       _(fresh.lines).must_include "show version"
       _(shell.lines).wont_include "show version"
     end
 
-    it "shuts the session down when the connection is gone during session setup" do
+    it "drops the session when the connection is gone during session setup" do
       conn, shell = connect(privilege: 1, drop_after: "")
 
       _ { conn.run_command("show clock") }.must_raise Train::Transports::SSHFailed
-      _(shell.shut_down?).must_equal true
+      _(shell.closed?).must_equal true
     end
 
     it "reports the dropped connection when it drops during enable" do

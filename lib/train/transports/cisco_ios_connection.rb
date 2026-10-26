@@ -185,13 +185,17 @@ class Train::Transports::SSH
     # and opened again before the command is typed, so a command is never typed into a dead
     # session or typed twice.
     def reset_closed_session
+      reopen if session_closed?
+    end
+
+    # Processes the session once with no wait; a device that has closed it shows up as
+    # closed, or as an error on a path already gone.
+    def session_closed?
       ssh = @session.connection
       ssh.process(0) unless ssh.closed?
-      return unless ssh.closed?
-
-      reopen
+      ssh.closed?
     rescue Net::SSH::Exception, IOError, SystemCallError
-      reopen
+      true
     end
 
     def reopen
