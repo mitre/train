@@ -435,7 +435,9 @@ describe "os_detect" do
       ["empty release tag alone (synthetic)", "Cisco IOS Software [], Catalyst L3 Switch Software (CAT9K_IOSXE), Version 17.8.1, RELEASE SOFTWARE (fc1)", "cisco_ios_xe", "17.8.1"],
       # IOS XE 3.x routers pair the IOS XE release with an IOSd 15.x IOS line; the IOS XE
       # release is the one reported. Line format as printed by a CSR1000V on 3.16.
-      ["CSR1000V IOS XE 3.16 (line format from Netshot's CSR1000V simulator)", "Cisco IOS XE Software, Version 03.16.07b.S - Extended Support Release\r\nCisco IOS Software, CSR1000V Software (X86_64_LINUX_IOSD-UNIVERSALK9-M), Version 15.5(3)S7b, RELEASE SOFTWARE (fc1)\r\nCopyright (c) 1986-2018 by Cisco Systems, Inc.", "cisco_ios_xe", "03.16.07"],
+      # Not a captured banner: the two-line layout of IOS XE 3.x routers (CSR 1000V, ASR 1000,
+      # ISR 4000), whose IOS XE line carries the 03.x release and whose IOS line the IOSd 15.x one.
+      ["CSR 1000V IOS XE 3.x two-line layout (synthetic)", "Cisco IOS XE Software, Version 03.16.04b.S - Extended Support Release\r\nCisco IOS Software, CSR1000V Software (X86_64_LINUX_IOSD-UNIVERSALK9-M), Version 15.5(3)S4b, RELEASE SOFTWARE (fc1)\r\nCopyright (c) 1986-2016 by Cisco Systems, Inc.", "cisco_ios_xe", "03.16.04"],
       # Over SSH, lines end in CRLF and the version can end the line.
       ["IOS line ending in CRLF right after the version", "Cisco IOS Software, C3750E Software (C3750E-UNIVERSALK9-M), Version 12.2(58)SE\r\nCopyright (c) 1986-2011 by Cisco Systems, Inc.", "cisco_ios", "12.2"],
       # The first command of a session can carry a MOTD or exec banner configured without

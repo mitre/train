@@ -7,8 +7,9 @@ class FakeIOSChannel
     @shell = shell
   end
 
+  # As Net::SSH, data goes out when the session is processed, not when it is sent.
   def send_data(data)
-    @shell.type(data)
+    @shell.pending << data
   end
 
   def connection
@@ -25,7 +26,10 @@ end
 # Enter; each Enter's reply arrives as its own chunk, and the connection only sees a chunk
 # when it processes the session. Processing with nothing to deliver waits and returns, as
 # Net::SSH does. Like Net::SSH, Session#close blocks until the device confirms the channel
-# close, and shutdown! drops the connection at once.
+# close, and shutdown! drops the connection at once. The prompt ends in > at privilege 0
+# and 1 and in # from 2 up, as on IOS. Output longer than the terminal length (24 lines
+# until `terminal length 0`) stops at --More-- and waits for a key. A reply over 8 KB
+# arrives in 4 KB chunks.
 #
 # Options: secret nil is a router with no enable secret (a vty refuses enable), :none an
 # enable that asks for no password. split: sends each reply's last line end and prompt as
@@ -34,20 +38,24 @@ end
 # an AAA enable that asks for a username first. stall_on: is a line the device never
 # answers. line_delay: sends replies a line at a time, that many seconds apart, as a long
 # command streams its output. late: maps a line to the seconds its reply is held back.
-# login_banner: is text the device prints before its first prompt, with no line end.
+# login_banner: is text the device prints before its first prompt, with no line end;
+# login_chunks: gives the login output instead as [text, seconds] pieces, as packets.
 # log_after: maps a line to the seconds after its reply at which a syslog message arrives
 # and IOS reprints the prompt (`terminal monitor` with `logging synchronous`).
 # `exit` ends the exec session: the device closes the channel. confirm_close: false is a
 # device that never confirms a
 # channel close; drop_on: is a line after which the path to the device is gone, before
-# its reply; drop_after: one whose reply arrives and then the path is gone.
+# its reply; drop_after: one whose reply arrives and then the path is gone; drop_during:
+# one whose reply is cut off by the path going after its first chunk.
 class FakeIOSShell
-  attr_reader :lines, :channel
+  attr_reader :lines, :channel, :pending
 
   def initialize(connection, privilege:, secret:, split: false, password_prompt: "Password: ",
                  username_prompt: nil, stall_on: nil, line_delay: nil, confirm_close: true, drop_on: nil,
-                 drop_after: nil, late: {}, login_banner: "", log_after: {})
+                 drop_after: nil, drop_during: nil, late: {}, login_banner: "", login_chunks: nil, log_after: {})
     @connection = connection
+    @pending = +""
+    @terminal_length = 24
     @privilege = privilege
     @secret = secret
     @split = split
@@ -58,6 +66,7 @@ class FakeIOSShell
     @confirm_close = confirm_close
     @drop_on = drop_on
     @drop_after = drop_after
+    @drop_during = drop_during
     @late = late
     @log_after = log_after
     @drop_when_read = false
@@ -73,12 +82,14 @@ class FakeIOSShell
     @lines = []
     login = "\r\n\r\n\r\n#{login_banner}#{prompt}"
     at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-    @chunks = (line_delay ? login.scan(/.*?\r\n|.+\z/) : [login]).map { |piece| [piece, at += line_delay.to_f] }
+    @chunks = if login_chunks
+                login_chunks.map { |piece, delay| [piece, at += delay] }
+              else
+                (line_delay ? login.scan(/.*?\r\n|.+\z/) : [login]).map { |piece| [piece, at += line_delay.to_f] }
+              end
   end
 
   def type(data)
-    raise Net::SSH::Disconnect, "connection closed by remote host" if @dropped
-
     data.each_char do |char|
       if ["\r", "\n"].include?(char)
         enter
@@ -99,6 +110,12 @@ class FakeIOSShell
   def process(wait = nil)
     raise Net::SSH::Disconnect, "connection closed by remote host" if @dropped
 
+    unless @pending.empty?
+      typed = @pending
+      @pending = +""
+      type(typed)
+      raise Net::SSH::Disconnect, "connection closed by remote host" if @dropped
+    end
     if @close_requested
       @channel_open = false if @confirm_close
       return wait_for(wait)
@@ -109,8 +126,9 @@ class FakeIOSShell
     ready_at = @chunks.first[1]
     return wait_for([wait.to_f, ready_at - now].min) if now < ready_at
 
-    @connection.instance_variable_set(:@buf, @connection.instance_variable_get(:@buf) + @chunks.shift[0])
+    @connection.instance_variable_get(:@buf) << @chunks.shift[0]
     @dropped = true if @drop_when_read && @chunks.empty?
+    @dropped = true if @drop_during_read
   end
 
   def close
@@ -143,7 +161,7 @@ class FakeIOSShell
   end
 
   def prompt
-    @privilege == 15 ? "R1#" : "R1>"
+    @privilege >= 2 ? "R1#" : "R1>"
   end
 
   def enter
@@ -154,13 +172,17 @@ class FakeIOSShell
     return @dropped = true if line == @drop_on
 
     @drop_when_read = true if line == @drop_after
+    @drop_during_read = true if line == @drop_during
 
     reply = @password_attempts ? password(line) : command(line)
+    reply = page(reply)
     cut = reply.rindex("\r\n")
     pieces = if @line_delay
                reply.scan(/.*?\r\n|.+\z/)
              elsif @split && cut
                [reply[0, cut + 2], reply[(cut + 2)..-1]]
+             elsif reply.size > 8192
+               reply.scan(/.{1,4096}/m)
              else
                [reply]
              end
@@ -174,6 +196,14 @@ class FakeIOSShell
       @chunks << ["\r\n*Oct 25 16:26:01.001: %SYS-5-CONFIG_I: Configured from console by console\r\n#{prompt}", at + @log_after[line]]
     end
     @channel_open = false if line == "exit" && @confirm_close
+  end
+
+  # Stops long output at --More--, as IOS does until `terminal length 0`.
+  def page(reply)
+    lines = reply.split(/(?<=\r\n)/)
+    return reply if @terminal_length == 0 || lines.size <= @terminal_length
+
+    lines.first(@terminal_length - 1).join + " --More-- "
   end
 
   # Passwords are not echoed. Three wrong tries return to user EXEC.
@@ -208,9 +238,14 @@ class FakeIOSShell
       "#{line}\r\n16:26:00.000 UTC Sun Oct 25 2026\r\n#{prompt}"
     when "exit"
       "#{line}\r\n"
+    when /\Aterminal length (\d+)\z/
+      @terminal_length = Regexp.last_match(1).to_i
+      "#{line}\r\n#{prompt}"
+    when "show tech-support"
+      "#{line}\r\n#{"#{"x" * 62}\r\n" * 120_000}end\r\n#{prompt}"
     when "show running-config"
       config = ["Building configuration...", "", "hostname R1", "!", "banner motd ^C", "##########",
-                "Authorized access only", "Access denied to unauthorized users", "##########", "^C"] + (1..8).map { |n| "interface Ethernet0/#{n}" } + ["end"]
+                "Authorized access only", "Access denied to unauthorized users", "##########", "^C"] + (1..24).map { |n| "interface Ethernet0/#{n}" } + ["end"]
       "#{line}\r\n#{config.join("\r\n")}\r\n#{prompt}"
     else
       "#{line}\r\n#{prompt}"
@@ -341,6 +376,94 @@ describe "CiscoIOSConnection" do
       _(conn.run_command("show privilege").stdout).must_equal "Current privilege level is 15"
     end
 
+    it "finds the prompt past a bordered login banner with pauses longer than the quiet time" do
+      border = "##########\r\n"
+      notice = "You are accessing a U.S. Government (USG) Information System (IS)\r\n"
+      conn, = connect(privilege: 15, login_banner: border + notice + border, line_delay: 0.15)
+
+      _(conn.run_command("show clock").stdout).must_equal "16:26:00.000 UTC Sun Oct 25 2026"
+    end
+
+    it "does not take a banner border line for the prompt when its line break arrives later" do
+      chunks = [["\r\n##########", 0], ["\r\nAuthorized access only\r\n##########", 0.15], ["\r\nR1#", 0.15]]
+      conn, = connect(privilege: 15, login_chunks: chunks)
+
+      _(conn.run_command("show clock").stdout).must_equal "16:26:00.000 UTC Sun Oct 25 2026"
+    end
+
+    it "finds the prompt when a login banner is glued to it and the reply to Enter is late" do
+      conn, = connect(privilege: 15, login_banner: "Authorized access only", late: { "" => 0.3 })
+
+      _(conn.run_command("show clock").stdout).must_equal "16:26:00.000 UTC Sun Oct 25 2026"
+    end
+
+    it "enters enable mode when the login lands at a privilege level between 2 and 14" do
+      conn, = connect(privilege: 5)
+
+      _(conn.run_command("show privilege").stdout).must_equal "Current privilege level is 15"
+    end
+
+    it "does not type exit at a pending password prompt when enable fails" do
+      conn, shell = connect(privilege: 1, enable_password: "wrong")
+
+      _ { conn.run_command("show privilege") }.must_raise Train::Transports::SSH::CiscoIOSConnection::BadEnablePassword
+      _(shell.lines).wont_include "exit"
+      _(shell.closed?).must_equal true
+    end
+
+    it "drops the session at once after a command timeout instead of waiting for the device" do
+      conn, = connect(privilege: 15, stall_on: "show clock", confirm_close: false)
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+
+      _ { conn.run_command("show clock", timeout: 0.2) }.must_raise Train::CommandTimeoutReached
+      _(Process.clock_gettime(Process::CLOCK_MONOTONIC) - started).must_be :<, 1
+    end
+
+    it "reads a 7 MB output in well under the default timeout" do
+      conn, = connect(privilege: 15)
+      conn.run_command("show clock")
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+
+      output = conn.run_command("show tech-support").stdout
+      _(Process.clock_gettime(Process::CLOCK_MONOTONIC) - started).must_be :<, 1
+      _(output.lines.last).must_equal "end"
+      _(output.size).must_be :>, 7_000_000
+    end
+
+    it "gives a command 10 seconds by default" do
+      conn, = connect(privilege: 15, stall_on: "show clock")
+      conn.run_command("show privilege")
+      conn.stubs(:monotonic_now).returns(0, 10.5)
+
+      error = _ { conn.run_command("show clock") }.must_raise Train::CommandTimeoutReached
+      _(error.message).must_include "10s"
+    end
+
+    it "turns paging off so long output is not cut at --More--" do
+      conn, = connect(privilege: 15)
+
+      _(conn.run_command("show running-config").stdout.lines.last).must_equal "end"
+    end
+
+    it "closes the SSH session gracefully when the device confirms the channel close" do
+      conn, shell = connect(privilege: 15)
+      conn.run_command("show clock")
+
+      conn.close
+      _(shell.closed?).must_equal true
+      _(shell.shut_down?).must_equal false
+    end
+
+    it "does not retype a command whose output was cut off by the connection dropping" do
+      conn, shell = connect(privilege: 15, drop_during: "show clock", line_delay: 0.01)
+      fresh = FakeIOSShell.new(conn, privilege: 15, secret: "s3cret")
+      conn.stubs(:open_channel).returns(shell.channel).then.returns(fresh.channel)
+      conn.run_command("show privilege")
+
+      _ { conn.run_command("show clock") }.must_raise Net::SSH::Disconnect
+      _(fresh.lines).must_be_empty
+    end
+
     it "types each command with one Enter" do
       conn, shell = connect(privilege: 15)
       conn.run_command("show clock")
@@ -419,12 +542,15 @@ describe "CiscoIOSConnection" do
       conn.close
     end
 
-    it "shuts the session down when the connection is gone before the next command is sent" do
+    it "opens a new session when the device closed the old one while it was idle" do
       conn, shell = connect(privilege: 15, drop_after: "show clock")
+      fresh = FakeIOSShell.new(conn, privilege: 15, secret: "s3cret")
+      conn.stubs(:open_channel).returns(shell.channel).then.returns(fresh.channel)
       conn.run_command("show clock")
 
-      _ { conn.run_command("show privilege") }.must_raise Net::SSH::Disconnect
+      _(conn.run_command("show privilege").stdout).must_equal "Current privilege level is 15"
       _(shell.shut_down?).must_equal true
+      _(fresh.lines).must_include "show privilege"
     end
 
     it "shuts the session down when the connection is gone during session setup" do

@@ -19,7 +19,8 @@ class Train::Transports::SSH
       # Allow older algorithms
       @ssh_options[:append_all_supported_algorithms] = true
 
-      @buf = ""
+      @buf = +""
+      @idle = false
     end
 
     def uri
@@ -41,8 +42,10 @@ class Train::Transports::SSH
 
     # Ends the exec session with `exit`, as Netmiko's disconnect does, and closes the SSH
     # session. Net::SSH's Session#close waits, with no limit, for the device to confirm the
-    # channel close; this waits at most the connection timeout, then drops the connection, as
-    # it does when the path to the device is already gone.
+    # channel close; this waits at most the connection timeout, then drops the connection.
+    # When the session is not idle at a prompt (a command timed out, enable is waiting at a
+    # question, the path is gone) `exit` would be taken as an answer, so the connection is
+    # dropped at once instead.
     def close
       return if @session.nil?
 
@@ -50,6 +53,7 @@ class Train::Transports::SSH
       @session = nil
       ssh = channel.connection
       return if ssh.closed?
+      return ssh.shutdown! unless @idle
 
       channel.send_data("exit\n")
       channel.close
@@ -59,6 +63,8 @@ class Train::Transports::SSH
     rescue Net::SSH::Exception, IOError, SystemCallError => e
       logger.debug("[SSH] dropping the connection to #{self}: #{e.message}")
       ssh&.shutdown!
+    ensure
+      @idle = false
     end
 
     private
@@ -66,11 +72,11 @@ class Train::Transports::SSH
     # Seconds a command may take in total, as Netmiko's read_timeout; run_command's :timeout
     # (InSpec's --command-timeout) overrides it.
     READ_TIMEOUT = 10
-    # A prompt at the end of what the device sent.
-    PROMPT_END = /[>#]\s*\z/.freeze
-    # Seconds without new data after which the login output (a banner, say) counts as done;
-    # Netmiko's clear_buffer starts at the same 0.1.
-    QUIET = 0.1
+    # A prompt at the end of what the device sent: > or # last on its line. A banner's border
+    # line ("##########") ends in a line break, not in #.
+    PROMPT_END = /[>#][ \t]*\z/.freeze
+    # Enters pressed, at most, to find the prompt and see it answered alone.
+    PROMPT_TRIES = 5
     # IOS ends a question with a colon. The enable password is typed only at a question that
     # asks for a password or secret: IOS's own "Password: " or one set with
     # `aaa authentication password-prompt`. AAA can ask for a username first, under any text
@@ -97,39 +103,40 @@ class Train::Transports::SSH
       raise
     end
 
-    # As Netmiko's session_preparation for IOS: find the device's prompt, enter enable mode
-    # when a password is given and the session is not privileged, then turn off paging and
-    # line wrapping.
+    # As Netmiko's session_preparation for IOS, with the enable step: find the device's
+    # prompt; when an enable password is given and the session is not at privilege 15 (a
+    # login at level 1 shows >, one at levels 2 to 14 shows # too), enter enable mode; then
+    # turn off paging and line wrapping.
     def prepare_session
-      prompt = find_prompt
-      enable_privileged_exec if @enable_password && prompt.end_with?(">")
+      find_prompt
+      if @enable_password && send_command("show privilege", setup_timeout, Train::Transports::SSHFailed).split.last != "15"
+        enable_privileged_exec
+      end
       send_command("terminal length 0", setup_timeout, Train::Transports::SSHFailed)
       send_command("terminal width 511", setup_timeout, Train::Transports::SSHFailed)
     end
 
-    # As Netmiko's find_prompt: press Enter, let the login output (a banner whose border
-    # lines can end in # or >, say) finish, and take the last line as the prompt. Its text
-    # before > or # is the base prompt that ends every command's output from now on.
+    # As Netmiko's find_prompt: press Enter and take the last line of the reply as the
+    # prompt. The prompt is only trusted once an Enter is answered with that line alone, so
+    # login output still arriving (a banner, whose border line can end in # when its line
+    # break comes in a later packet) is not taken for it. This replaces Netmiko's draining
+    # of the login output before the first Enter. The prompt's text before > or # is the
+    # base prompt that ends every command's output from now on.
     def find_prompt
-      @session.send_data("\n")
-      read_until_quiet
-      prompt = @buf.strip.split(/\r?\n/).last
-      @base_prompt = prompt.chop
-      prompt
-    end
-
-    # Processes the channel until what arrived ends at a prompt and nothing more has come for
-    # QUIET seconds, for at most the connection timeout.
-    def read_until_quiet
-      received = @buf.size
-      quiet_since = monotonic_now
-      read_until(setup_timeout, "the prompt", Train::Transports::SSHFailed) do
-        if @buf.size != received
-          received = @buf.size
-          quiet_since = monotonic_now
+      prompt = nil
+      PROMPT_TRIES.times do
+        @buf = +""
+        @session.send_data("\n")
+        read_until(setup_timeout, "the prompt", Train::Transports::SSHFailed) { @buf.match?(PROMPT_END) }
+        lines = @buf.strip.split(/\r?\n/)
+        if lines == [prompt]
+          @base_prompt = prompt.chop
+          return prompt
         end
-        @buf.match?(PROMPT_END) && monotonic_now - quiet_since >= QUIET
+
+        prompt = lines.last
       end
+      raise Train::Transports::SSHFailed, "no prompt found: #{prompt.inspect}"
     end
 
     # As Netmiko's enable: type `enable`, read its echo, then read to the prompt or a question;
@@ -152,7 +159,8 @@ class Train::Transports::SSH
     # One line of the enable exchange: what follows the echo (when one is given) up to the
     # prompt or a question.
     def enable_step(line, echo: nil)
-      @buf = ""
+      @idle = false
+      @buf = +""
       @session.send_data(line)
       reply = nil
       read_until(setup_timeout, "enable", Train::Transports::SSHFailed) do
@@ -164,8 +172,18 @@ class Train::Transports::SSH
 
     def run_command_via_connection(cmd, opts = {}, &_data_handler)
       logger.debug("[SSH] Running `#{cmd}` on #{self}")
-      session
-      format_result(send_command(cmd, opts[:timeout] || READ_TIMEOUT, Train::CommandTimeoutReached))
+      reopened = false
+      begin
+        session
+        format_result(send_command(cmd, opts[:timeout] || READ_TIMEOUT, Train::CommandTimeoutReached))
+      rescue Net::SSH::Disconnect, IOError, SystemCallError
+        # The device closes an idle session after its exec-timeout; when that is found out
+        # before any output arrived, open a new session and type the command again.
+        raise if reopened || !@buf.empty?
+
+        reopened = true
+        retry
+      end
     end
 
     # As Netmiko's send_command: type the command with one Enter, read its echo, then read to
@@ -174,14 +192,19 @@ class Train::Transports::SSH
     # that does not finish within `timeout` seconds raises `error` and drops the session, so
     # its late output cannot answer a later command; so does losing the connection.
     def send_command(cmd, timeout, error)
-      @buf = ""
+      @idle = false
+      @buf = +""
       @session.send_data("#{cmd}\n")
-      prompt = /\r?\n#{Regexp.escape(@base_prompt)}[>#]\s*\z/
+      prompt = /\r?\n#{Regexp.escape(@base_prompt)}[>#][ \t]*\z/
       echo = /#{Regexp.quote(cmd)}\r?\n/
+      # Only the end of the buffer can hold the prompt, so large output is not rescanned.
+      tail = @base_prompt.size + 8
+      start = nil
       read_until(timeout, "`#{cmd}`", error) do
-        start = @buf.index(echo)
-        start && @buf[start..-1].match?(prompt)
+        start ||= @buf.index(echo)
+        start && @buf[[@buf.size - tail, start].max..-1].match?(prompt)
       end
+      @idle = true
       format_output(@buf, cmd, @base_prompt)
     rescue error, Net::SSH::Exception, IOError, SystemCallError
       close
@@ -242,7 +265,7 @@ class Train::Transports::SSH
       logger.debug("[SSH] opening SSH channel to #{self}")
       ssh.open_channel do |ch|
         ch.on_data do |_, data|
-          @buf += data
+          @buf << data
         end
 
         ch.send_channel_request("shell") do |_, success|
