@@ -397,6 +397,14 @@ describe "os_detect" do
     # tests/ShowVersion/cli/equal/<file>); the Catalyst 9300 rows are from Cisco's 17.14
     # release notes; the IOL rows are from Cisco Modeling Labs IOL nodes.
     cisco_banners = [
+      # Not captured banners. Cisco names the SD-WAN image "Cisco IOS XE SD-WAN Software" in
+      # its advisories, and genieparser's ShowVersion parser reads any words between "Cisco"
+      # and "Software, Version"; the release comes from that line as on other IOS XE.
+      ["IOS XE SD-WAN version line (synthetic)", "Cisco IOS XE SD-WAN Software, Version 16.12.01d.0.27\nCisco IOS Software [Gibraltar], ISR Software (X86_64_LINUX_IOSD-UCMK9-M), Version 16.12.1d, RELEASE SOFTWARE (fc2)", "cisco_ios_xe", "16.12.01"],
+      # Classic IOS whose login banner mentions IOS XE: an IOS XE line only counts directly
+      # above the IOS line, where IOS XE prints it.
+      ["classic IOS with IOS XE named in its banner (synthetic)", "Moving to Cisco IOS XE Software, Version 17.9.4 on Monday\r\n\r\nCisco IOS Software, C3750E Software (C3750E-UNIVERSALK9-M), Version 12.2(58)SE, RELEASE SOFTWARE (fc1)", "cisco_ios", "12.2"],
+      ["IOS XE with IOS XE named in its banner (synthetic)", "Moving to Cisco IOS XE Software, Version 17.9.4 on Monday\r\n\r\nCisco IOS XE Software, Version 17.13.01\r\nCisco IOS Software [Dublin], Catalyst L3 Switch Software (CAT9K_IOSXE), Version 17.13.1, RELEASE SOFTWARE (fc1)", "cisco_ios_xe", "17.13.01"],
       ["IOL router (17.15)", "Cisco IOS Software [IOSXE], Linux Software (X86_64BI_LINUX-ADVENTERPRISEK9-M), Version 17.15.1, RELEASE SOFTWARE (fc4)", "cisco_ios_xe", "17.15.1"],
       ["IOL switch (17.15)", "Cisco IOS Software [IOSXE], Linux Software (X86_64BI_LINUX_L2-ADVENTERPRISEK9-M), Version 17.15.1, RELEASE SOFTWARE (fc4)", "cisco_ios_xe", "17.15.1"],
       ["Catalyst 9300 17.13 (release notes)", "Cisco IOS XE Software, Version 17.13.01\nCisco IOS Software [Dublin], Catalyst L3 Switch Software (CAT9K_IOSXE), Version 17.13.1, RELEASE SOFTWARE (fc1)", "cisco_ios_xe", "17.13.01"],

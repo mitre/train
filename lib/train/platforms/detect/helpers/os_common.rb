@@ -92,7 +92,7 @@ module Train::Platforms::Detect::Helpers
     # of a line, after "Cisco Internetwork Operating System Software". The version stops at a
     # space, comma or line end (CRLF over SSH).
     CISCO_IOS_LINE = /(?:Cisco IOS Software(?: \[(?<tag>[^\]]*)\])?,|^IOS \(tm\)) (?<description>.*?) ?\((?<image>[^)]+)\),? +(?:Experimental )?Version (?<version>[^\s,]+)/.freeze
-    CISCO_IOS_XE_LINE = /Cisco IOS XE Software, Version (?<version>[^\s,]+)/.freeze
+    CISCO_IOS_XE_LINE = /Cisco IOS XE (?:SD-WAN )?Software, Version (?<version>[^\s,]+)/.freeze
     CISCO_IOS_XE_NOTICE = /Cisco IOS-XE software, Copyright/.freeze
 
     # Decides the Cisco platform by markers rather than by the wording of one line, which
@@ -122,7 +122,7 @@ module Train::Platforms::Detect::Helpers
     # Without a numeric release there is no platform.
     def cisco_ios_version(res)
       ios = res.match(CISCO_IOS_LINE)
-      xe = res.match(CISCO_IOS_XE_LINE)
+      xe = cisco_ios_xe_line(res, ios)
       return if ios.nil? && xe.nil?
 
       model = ios && ios[:image]
@@ -136,6 +136,15 @@ module Train::Platforms::Detect::Helpers
       version && { version: version, model: model, type: "ios-xe" }
     end
 
+    # The "Cisco IOS XE Software, Version" line. IOS XE prints it directly above the IOS line;
+    # the same words elsewhere, such as in a login banner, are not it.
+    def cisco_ios_xe_line(res, ios)
+      lines = res.to_enum(:scan, CISCO_IOS_XE_LINE).map { Regexp.last_match }
+      return lines.first if ios.nil?
+
+      lines.find { |xe| res[xe.end(0)...ios.begin(0)].to_s.count("\n") == 1 }
+    end
+
     # IOS XE markers: a "Cisco IOS XE Software" line (16.x and later); a release tag on the
     # IOS line, which classic IOS never prints; "IOS-XE Software" on the IOS line (3.x); the
     # "Cisco IOS-XE software, Copyright" notice (3.x and later).
@@ -145,7 +154,7 @@ module Train::Platforms::Detect::Helpers
 
       res.match?(CISCO_IOS_XE_NOTICE)
     end
-    private :cisco_nexus_version, :cisco_ios_version, :cisco_ios_xe?
+    private :cisco_nexus_version, :cisco_ios_version, :cisco_ios_xe_line, :cisco_ios_xe?
 
     def unix_uuid
       (unix_uuid_from_chef         ||
